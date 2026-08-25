@@ -1,0 +1,11 @@
+{
+  "query_groups": {
+    "openssl_pqc_api": [
+      {
+        "query_key": "openssl_evp_mlkem_ctx",
+        "query_text": "\"EVP_PKEY_CTX_new_from_name\" \"ML-KEM\" language:C",
+        "page_size": 50
+      }
+    ]
+  }
+}
