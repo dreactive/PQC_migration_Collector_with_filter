@@ -14,3 +14,27 @@ def connect(path=None, root=None):
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def init_query_pages_table(conn):
+    """Create the query page storage table."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS query_pages (
+            query_page_key TEXT PRIMARY KEY,
+            batch_id TEXT NOT NULL,
+            query_key TEXT NOT NULL,
+            query_group TEXT NOT NULL,
+            page INTEGER NOT NULL,
+            page_size INTEGER NOT NULL,
+            total_count INTEGER NOT NULL,
+            item_count INTEGER NOT NULL,
+            new_unique_item_count INTEGER NOT NULL,
+            duplicate_item_count INTEGER NOT NULL,
+            duplicate_ratio REAL NOT NULL,
+            raw_path TEXT NOT NULL,
+            fetched_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
