@@ -1,0 +1,11 @@
+{
+  "drop_path_fragments": [
+    "/docs/",
+    "/vendor/",
+    "/test/"
+  ],
+  "drop_file_names": [
+    "README.md",
+    ".ctags"
+  ]
+}

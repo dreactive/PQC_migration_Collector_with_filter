@@ -1,0 +1,14 @@
+{
+  "libraries": {
+    "OpenSSL": {
+      "languages": [
+        "C",
+        "C++"
+      ],
+      "signals": [
+        "EVP_PKEY_CTX_new_from_name",
+        "OSSL_PROVIDER_load"
+      ]
+    }
+  }
+}

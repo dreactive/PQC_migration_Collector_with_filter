@@ -34,3 +34,8 @@ def load_config(name, root=None):
         raise ValueError(f"config must be a JSON object: {config_path}")
 
     return loaded
+
+
+def load_all_configs(root=None):
+    """Load every registered JSON config file."""
+    return {name: load_config(name, root) for name in CONFIG_FILE_NAMES}

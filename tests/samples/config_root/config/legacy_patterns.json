@@ -1,0 +1,8 @@
+{
+  "legacy_families": [
+    "RSA",
+    "ECDH",
+    "ECDSA",
+    "X25519"
+  ]
+}

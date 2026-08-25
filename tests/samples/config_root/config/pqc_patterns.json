@@ -1,0 +1,8 @@
+{
+  "strong_signals": [
+    "ML-KEM",
+    "ML-DSA",
+    "X25519MLKEM768",
+    "oqsprovider"
+  ]
+}

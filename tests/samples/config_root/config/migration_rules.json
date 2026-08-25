@@ -1,0 +1,11 @@
+{
+  "export_labels": [
+    "hybrid_migration",
+    "partial_migration",
+    "full_migration"
+  ],
+  "excluded_labels": [
+    "pqc_addition_only",
+    "dropped"
+  ]
+}
