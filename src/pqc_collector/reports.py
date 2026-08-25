@@ -301,3 +301,9 @@ def report_paths(batch_id, root=None):
 def report_schemas():
     """Return required fields for each collector, filter, and export report."""
     return REPORT_SCHEMAS
+
+
+def write_schema_preview(output_path):
+    from pqc_collector.schema_preview import write_schema_preview as write_preview
+
+    return write_preview(output_path, report_schemas())
