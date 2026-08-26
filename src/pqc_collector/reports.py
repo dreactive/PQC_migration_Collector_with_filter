@@ -533,6 +533,43 @@ def write_raw_search_items_report(conn, batch_id, output_path=None, root=None):
     return report_path
 
 
+def normalize_f0_report_row(batch_id, row):
+    """Return one F0 report row with the public JSONL schema."""
+    item = dict(row)
+    reason_codes = item.get("reason_codes", [])
+    if not reason_codes and item.get("reason_codes_json"):
+        reason_codes = json.loads(item["reason_codes_json"])
+    return {
+        "batch_id": batch_id,
+        "search_item_key": item["search_item_key"],
+        "repository_full_name": item["repository_full_name"],
+        "path": item["path"],
+        "normalized_path": item["normalized_path"],
+        "source_kind": item["source_kind"],
+        "passed": bool(item["passed"]),
+        "reason_codes": list(reason_codes),
+        "checked_at": item["checked_at"],
+    }
+
+
+def write_f0_report(rows, batch_id, output_path=None, root=None):
+    """Write F0 path quality rows for one batch as JSONL."""
+    report_path = output_path or report_paths(batch_id, root)["filter"]["filter_f0_path_quality"]
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    normalized_rows = []
+    for row in rows:
+        item = dict(row)
+        if item.get("batch_id", batch_id) == batch_id:
+            normalized_rows.append(normalize_f0_report_row(batch_id, item))
+    normalized_rows.sort(key=lambda row: (row["passed"], row["source_kind"], row["path"]))
+
+    with report_path.open("w", encoding="utf-8") as handle:
+        for row in normalized_rows:
+            handle.write(json.dumps(row, ensure_ascii=True, sort_keys=True))
+            handle.write("\n")
+    return report_path
+
+
 def write_dedupe_summary_report(
     conn,
     batch_id,
