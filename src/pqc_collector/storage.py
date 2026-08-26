@@ -425,6 +425,43 @@ def upsert_raw_search_item(conn, batch_id, query_key, query_page_key, item, raw_
     }
 
 
+def iter_raw_search_items(conn, batch_id, limit=None):
+    """Yield raw search item rows for one batch in a stable order."""
+    params = [batch_id]
+    limit_clause = ""
+    if limit is not None:
+        limit_clause = "LIMIT ?"
+        params.append(max(0, int(limit)))
+
+    rows = conn.execute(
+        f"""
+        SELECT
+            batch_id,
+            search_item_key,
+            query_key,
+            repository_id,
+            repository_full_name,
+            repository_url,
+            path,
+            normalized_path,
+            blob_sha,
+            file_api_url,
+            html_url,
+            status,
+            first_seen_batch_id,
+            last_seen_batch_id,
+            raw_query_page_path
+        FROM raw_search_items
+        WHERE batch_id = ?
+        ORDER BY repository_full_name, normalized_path, blob_sha
+        {limit_clause}
+        """,
+        tuple(params),
+    ).fetchall()
+    for row in rows:
+        yield dict(row)
+
+
 def upsert_f0_result(conn, batch_id, row):
     """Insert or update one F0 path quality result row."""
     existing = conn.execute(
