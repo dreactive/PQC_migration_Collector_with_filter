@@ -22,7 +22,11 @@ from pqc_collector.collector_reports import (  # noqa: E402
 from pqc_collector.database import connect, init_db  # noqa: E402
 from pqc_collector.github_client import GitHubClient  # noqa: E402
 from pqc_collector.raw_store import write_raw_response  # noqa: E402
-from pqc_collector.search_page_fetch import fetch_search_page_raw  # noqa: E402
+from pqc_collector.search_page_fetch import (  # noqa: E402
+    collect_one_page_batch,
+    fetch_search_page_raw,
+    make_query,
+)
 from pqc_collector.util import ensure_dirs, project_paths  # noqa: E402
 
 
@@ -246,23 +250,20 @@ def build_parser():
         action="store_true",
         help="Actually delete rows and batch directories. Omit for dry-run.",
     )
-    rate_limit = subparsers.add_parser(
-        "check-rate-limit",
-        help="Call GitHub /rate_limit once and store the raw response.",
-    )
-    rate_limit.add_argument(
-        "--batch-id",
-        default="batch-rate-limit",
-        help="Batch id used for the raw rate limit response.",
-    )
-    search_page = subparsers.add_parser(
-        "fetch-search-page",
-        help="Fetch one GitHub code search page and store the raw response.",
-    )
+    rate_limit = subparsers.add_parser("check-rate-limit", help="Call GitHub /rate_limit once.")
+    rate_limit.add_argument("--batch-id", default="batch-rate-limit")
+    search_page = subparsers.add_parser("fetch-search-page", help="Fetch one raw search page.")
     search_page.add_argument("--batch-id", required=True)
     search_page.add_argument("--query-text", required=True)
     search_page.add_argument("--page", default=1, type=int)
     search_page.add_argument("--per-page", default=50, type=int)
+    collect_page = subparsers.add_parser("collect-one-page", help="Collect and report one page.")
+    collect_page.add_argument("--batch-id", required=True)
+    collect_page.add_argument("--query-key", required=True)
+    collect_page.add_argument("--query-group", required=True)
+    collect_page.add_argument("--query-text", required=True)
+    collect_page.add_argument("--page", default=1, type=int)
+    collect_page.add_argument("--page-size", default=50, type=int)
     return parser
 
 
@@ -308,6 +309,13 @@ def main(argv=None):
             args.per_page,
             PROJECT_ROOT,
         )
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "collect-one-page":
+        load_env_file(PROJECT_ROOT / ".env")
+        query = make_query(args.query_key, args.query_group, args.query_text, args.page_size)
+        result = collect_one_page_batch(args.batch_id, query, args.page, PROJECT_ROOT)
         print(json.dumps(result, indent=2))
         return 0
 
