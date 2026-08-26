@@ -62,3 +62,14 @@ class GitHubClient:
     def rate_limit(self):
         """Fetch GitHub rate limit status."""
         return self.get_json("/rate_limit")
+
+    def search_code(self, query_text, page=1, per_page=50):
+        """Fetch one GitHub code search result page."""
+        return self.get_json(
+            "/search/code",
+            {
+                "q": query_text,
+                "page": int(page),
+                "per_page": int(per_page),
+            },
+        )
