@@ -22,6 +22,7 @@ from pqc_collector.collector_reports import (  # noqa: E402
 from pqc_collector.database import connect, init_db  # noqa: E402
 from pqc_collector.github_client import GitHubClient  # noqa: E402
 from pqc_collector.raw_store import write_raw_response  # noqa: E402
+from pqc_collector.search_page_fetch import fetch_search_page_raw  # noqa: E402
 from pqc_collector.util import ensure_dirs, project_paths  # noqa: E402
 
 
@@ -254,6 +255,14 @@ def build_parser():
         default="batch-rate-limit",
         help="Batch id used for the raw rate limit response.",
     )
+    search_page = subparsers.add_parser(
+        "fetch-search-page",
+        help="Fetch one GitHub code search page and store the raw response.",
+    )
+    search_page.add_argument("--batch-id", required=True)
+    search_page.add_argument("--query-text", required=True)
+    search_page.add_argument("--page", default=1, type=int)
+    search_page.add_argument("--per-page", default=50, type=int)
     return parser
 
 
@@ -287,6 +296,18 @@ def main(argv=None):
 
     if args.command == "check-rate-limit":
         result = check_rate_limit(args.batch_id)
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "fetch-search-page":
+        load_env_file(PROJECT_ROOT / ".env")
+        result = fetch_search_page_raw(
+            args.batch_id,
+            args.query_text,
+            args.page,
+            args.per_page,
+            PROJECT_ROOT,
+        )
         print(json.dumps(result, indent=2))
         return 0
 
