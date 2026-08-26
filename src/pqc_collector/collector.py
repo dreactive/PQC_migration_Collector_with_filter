@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from pqc_collector.keys import normalize_path, query_page_key, repository_key, search_item_key
+from pqc_collector.raw_store import write_raw_response
 
 
 def upsert_query_page(
@@ -68,6 +69,89 @@ def upsert_query_page(
     conn.commit()
     row["status"] = "new"
     return row
+
+
+def store_search_page(conn, batch_id, query, page, payload, root=None, fetched_at=None):
+    """Store one fixture GitHub code search page without calling the GitHub API."""
+    page_size = int(query["page_size"])
+    page_key = query_page_key(query["query_text"], page, page_size)
+    existing_page = conn.execute(
+        "SELECT raw_path FROM query_pages WHERE query_page_key = ?",
+        (page_key,),
+    ).fetchone()
+    if existing_page:
+        return {
+            "batch_id": batch_id,
+            "query_page_key": page_key,
+            "status": "existing",
+            "raw_path": existing_page["raw_path"],
+            "raw_item_seen_count": 0,
+            "new_unique_item_count": 0,
+            "previous_duplicate_count": 0,
+            "current_batch_duplicate_count": 0,
+            "skipped_query_page_count": 1,
+            "raw_search_items": [],
+        }
+
+    raw_path = write_raw_response(batch_id, "query_page", page_key, payload, root)
+    seen_item_keys = set()
+    unique_items = []
+    new_unique_item_count = 0
+    previous_duplicate_count = 0
+    current_batch_duplicate_count = 0
+
+    for item in payload.get("items", []):
+        item_key = search_item_key(item["repository"]["id"], item["path"], item["sha"])
+        if item_key in seen_item_keys:
+            current_batch_duplicate_count += 1
+            continue
+        seen_item_keys.add(item_key)
+        unique_items.append(item)
+        existing_item = conn.execute(
+            "SELECT 1 FROM raw_search_items WHERE search_item_key = ?",
+            (item_key,),
+        ).fetchone()
+        if existing_item:
+            previous_duplicate_count += 1
+        else:
+            new_unique_item_count += 1
+
+    duplicate_item_count = previous_duplicate_count + current_batch_duplicate_count
+    query_page_row = upsert_query_page(
+        conn,
+        batch_id,
+        query,
+        page,
+        payload,
+        raw_path,
+        new_unique_item_count,
+        duplicate_item_count,
+        fetched_at,
+    )
+    raw_search_items = [
+        upsert_raw_search_item(
+            conn,
+            batch_id,
+            query["query_key"],
+            page_key,
+            item,
+            raw_path,
+        )
+        for item in unique_items
+    ]
+
+    return {
+        "batch_id": batch_id,
+        "query_page_key": page_key,
+        "status": query_page_row["status"],
+        "raw_path": str(raw_path),
+        "raw_item_seen_count": len(payload.get("items", [])),
+        "new_unique_item_count": new_unique_item_count,
+        "previous_duplicate_count": previous_duplicate_count,
+        "current_batch_duplicate_count": current_batch_duplicate_count,
+        "skipped_query_page_count": 0,
+        "raw_search_items": raw_search_items,
+    }
 
 
 def upsert_repository(conn, batch_id, repository):
