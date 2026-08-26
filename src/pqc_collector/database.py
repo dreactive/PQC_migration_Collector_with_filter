@@ -55,3 +55,33 @@ def init_repositories_table(conn):
         """
     )
     conn.commit()
+
+
+def init_raw_search_items_table(conn):
+    """Create the raw GitHub code search item table."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS raw_search_items (
+            search_item_key TEXT PRIMARY KEY,
+            batch_id TEXT NOT NULL,
+            query_key TEXT NOT NULL,
+            query_page_key TEXT NOT NULL,
+            repository_key TEXT NOT NULL,
+            repository_id INTEGER NOT NULL,
+            repository_full_name TEXT NOT NULL,
+            repository_url TEXT NOT NULL,
+            path TEXT NOT NULL,
+            normalized_path TEXT NOT NULL,
+            blob_sha TEXT NOT NULL,
+            file_api_url TEXT NOT NULL,
+            html_url TEXT NOT NULL,
+            status TEXT NOT NULL,
+            first_seen_batch_id TEXT NOT NULL,
+            last_seen_batch_id TEXT NOT NULL,
+            raw_query_page_path TEXT NOT NULL,
+            FOREIGN KEY (query_page_key) REFERENCES query_pages (query_page_key),
+            FOREIGN KEY (repository_key) REFERENCES repositories (repository_key)
+        )
+        """
+    )
+    conn.commit()
