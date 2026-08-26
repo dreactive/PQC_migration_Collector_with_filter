@@ -1,4 +1,4 @@
-from pqc_collector.keys import repository_key
+from pqc_collector.keys import normalize_path, repository_key, search_item_key
 
 
 def upsert_repository(conn, batch_id, repository):
@@ -43,4 +43,85 @@ def upsert_repository(conn, batch_id, repository):
         "status": status,
         "first_seen_batch_id": first_seen_batch_id,
         "last_seen_batch_id": batch_id,
+    }
+
+
+def upsert_raw_search_item(conn, batch_id, query_key, query_page_key, item, raw_query_page_path):
+    """Insert or update one raw GitHub code search item row."""
+    repository = item["repository"]
+    repo_row = upsert_repository(conn, batch_id, repository)
+    normalized_path = normalize_path(item["path"])
+    item_key = search_item_key(repository["id"], normalized_path, item["sha"])
+
+    existing = conn.execute(
+        "SELECT first_seen_batch_id FROM raw_search_items WHERE search_item_key = ?",
+        (item_key,),
+    ).fetchone()
+    status = "existing" if existing else "new"
+    first_seen_batch_id = existing["first_seen_batch_id"] if existing else batch_id
+    repository_url = repository.get("html_url") or repository.get("url")
+
+    conn.execute(
+        """
+        INSERT INTO raw_search_items (
+            search_item_key,
+            batch_id,
+            query_key,
+            query_page_key,
+            repository_key,
+            repository_id,
+            repository_full_name,
+            repository_url,
+            path,
+            normalized_path,
+            blob_sha,
+            file_api_url,
+            html_url,
+            status,
+            first_seen_batch_id,
+            last_seen_batch_id,
+            raw_query_page_path
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(search_item_key) DO UPDATE SET
+            batch_id = excluded.batch_id,
+            query_key = excluded.query_key,
+            query_page_key = excluded.query_page_key,
+            status = excluded.status,
+            last_seen_batch_id = excluded.last_seen_batch_id,
+            raw_query_page_path = excluded.raw_query_page_path
+        """,
+        (
+            item_key,
+            batch_id,
+            query_key,
+            query_page_key,
+            repo_row["repository_key"],
+            int(repository["id"]),
+            repository["full_name"],
+            repository_url,
+            item["path"],
+            normalized_path,
+            item["sha"],
+            item["url"],
+            item["html_url"],
+            status,
+            first_seen_batch_id,
+            batch_id,
+            str(raw_query_page_path),
+        ),
+    )
+    conn.commit()
+
+    return {
+        "search_item_key": item_key,
+        "repository_key": repo_row["repository_key"],
+        "repository_full_name": repository["full_name"],
+        "path": item["path"],
+        "normalized_path": normalized_path,
+        "blob_sha": item["sha"],
+        "status": status,
+        "first_seen_batch_id": first_seen_batch_id,
+        "last_seen_batch_id": batch_id,
+        "raw_query_page_path": str(raw_query_page_path),
     }
