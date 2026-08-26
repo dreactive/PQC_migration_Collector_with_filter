@@ -38,3 +38,20 @@ def init_query_pages_table(conn):
         """
     )
     conn.commit()
+
+
+def init_repositories_table(conn):
+    """Create the GitHub repository metadata table."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS repositories (
+            repository_key TEXT PRIMARY KEY,
+            repository_id INTEGER NOT NULL UNIQUE,
+            full_name TEXT NOT NULL,
+            html_url TEXT NOT NULL,
+            first_seen_batch_id TEXT NOT NULL,
+            last_seen_batch_id TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
