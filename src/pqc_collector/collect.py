@@ -1,31 +1,159 @@
+import json
 import os
 from datetime import datetime, timezone
+from urllib.error import HTTPError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
-from pqc_collector.collector import store_search_page
-from pqc_collector.collector_reports import (
+from pqc_collector.core import query_page_key
+from pqc_collector.reports import (
     write_dedupe_summary_report,
     write_one_page_collection_reports,
     write_query_pages_report,
     write_raw_search_items_report,
 )
-from pqc_collector.database import connect, init_db
-from pqc_collector.github_client import GitHubClient
-from pqc_collector.keys import query_page_key
-from pqc_collector.rate_limit_policy import evaluate_rate_limit_floor
-from pqc_collector.raw_store import write_raw_response
+from pqc_collector.storage import connect, init_db, store_search_page, write_raw_response
+
+
+DEFAULT_SEARCH_REMAINING_FLOOR = 2
+DEFAULT_CORE_REMAINING_FLOOR = 100
+DEFAULT_RESUME_SAFETY_DELAY_SECONDS = 30
+
+
+class GitHubApiError(RuntimeError):
+    """Raised when GitHub returns a non-2xx API response."""
+
+
+class GitHubClient:
+    """Small GitHub REST client for collector API calls."""
+
+    def __init__(
+        self,
+        token=None,
+        base_url="https://api.github.com",
+        user_agent="pqc-migration-collector",
+        timeout=30,
+    ):
+        self.token = token
+        self.base_url = base_url.rstrip("/")
+        self.user_agent = user_agent
+        self.timeout = timeout
+
+    def _headers(self):
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": self.user_agent,
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        return headers
+
+    def _url(self, path, params=None):
+        path = "/" + path.lstrip("/")
+        url = f"{self.base_url}{path}"
+        if params:
+            url = f"{url}?{urlencode(params)}"
+        return url
+
+    def get_json(self, path, params=None):
+        """GET one GitHub JSON API resource."""
+        request = Request(self._url(path, params), headers=self._headers())
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                body = response.read().decode("utf-8")
+                payload = json.loads(body) if body else {}
+                return {
+                    "status_code": response.status,
+                    "headers": dict(response.headers.items()),
+                    "payload": payload,
+                }
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8")
+            payload = json.loads(body) if body else {}
+            raise GitHubApiError(
+                f"GitHub API error {exc.code} for {request.full_url}: {payload}"
+            ) from exc
+
+    def rate_limit(self):
+        """Fetch GitHub rate limit status."""
+        return self.get_json("/rate_limit")
+
+    def search_code(self, query_text, page=1, per_page=50):
+        """Fetch one GitHub code search result page."""
+        return self.get_json(
+            "/search/code",
+            {
+                "q": query_text,
+                "page": int(page),
+                "per_page": int(per_page),
+            },
+        )
+
+
+def _resource_snapshot(resources, name):
+    resource = resources.get(name, {})
+    return {
+        "limit": resource.get("limit"),
+        "remaining": resource.get("remaining"),
+        "reset": resource.get("reset"),
+    }
+
+
+def _sleep_until(blocked_resources, safety_delay_seconds):
+    reset_values = [
+        resource["reset"]
+        for resource in blocked_resources
+        if isinstance(resource.get("reset"), int)
+    ]
+    if not reset_values:
+        return None
+    resume_at = max(reset_values) + int(safety_delay_seconds)
+    return datetime.fromtimestamp(resume_at, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def evaluate_rate_limit_floor(
+    rate_limit_payload,
+    search_remaining_floor=DEFAULT_SEARCH_REMAINING_FLOOR,
+    core_remaining_floor=DEFAULT_CORE_REMAINING_FLOOR,
+    resume_safety_delay_seconds=DEFAULT_RESUME_SAFETY_DELAY_SECONDS,
+):
+    """Evaluate whether GitHub rate limit floors require sleeping."""
+    resources = rate_limit_payload.get("resources", rate_limit_payload)
+    search = _resource_snapshot(resources, "search")
+    core = _resource_snapshot(resources, "core")
+    floors = {
+        "search": int(search_remaining_floor),
+        "core": int(core_remaining_floor),
+    }
+    blocked_resources = []
+    for name, snapshot in (("search", search), ("core", core)):
+        remaining = snapshot.get("remaining")
+        if remaining is not None and int(remaining) <= floors[name]:
+            blocked_resources.append({"resource": name, **snapshot, "floor": floors[name]})
+
+    blocked = bool(blocked_resources)
+    return {
+        "collector_status": "sleeping_rate_limit" if blocked else "idle",
+        "blocked": blocked,
+        "blocked_resources": blocked_resources,
+        "search": {**search, "floor": floors["search"]},
+        "core": {**core, "floor": floors["core"]},
+        "sleep_until": _sleep_until(blocked_resources, resume_safety_delay_seconds),
+        "resume_safety_delay_seconds": int(resume_safety_delay_seconds),
+    }
 
 
 def _resource_snapshots(rate_limit_response):
     resources = rate_limit_response["payload"].get("resources", {})
-    snapshots = {}
-    for name in ("search", "core"):
-        resource = resources.get(name, {})
-        snapshots[name] = {
-            "limit": resource.get("limit"),
-            "remaining": resource.get("remaining"),
-            "reset": resource.get("reset"),
+    return {
+        name: {
+            "limit": resources.get(name, {}).get("limit"),
+            "remaining": resources.get(name, {}).get("remaining"),
+            "reset": resources.get(name, {}).get("reset"),
         }
-    return snapshots
+        for name in ("search", "core")
+    }
 
 
 def make_query(query_key, query_group, query_text, page_size):
@@ -124,14 +252,7 @@ def collect_one_query_page(conn, batch_id, query, page=1, root=None):
         base_url=os.environ.get("GITHUB_API_BASE") or "https://api.github.com",
     )
     response = client.search_code(query["query_text"], page=page, per_page=page_size)
-    result = store_search_page(
-        conn,
-        batch_id,
-        query,
-        page,
-        response["payload"],
-        root,
-    )
+    result = store_search_page(conn, batch_id, query, page, response["payload"], root)
     report_paths = {
         "query_pages": str(write_query_pages_report(conn, batch_id, root=root)),
         "raw_search_items": str(write_raw_search_items_report(conn, batch_id, root=root)),

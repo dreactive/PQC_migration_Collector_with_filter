@@ -1,6 +1,6 @@
 import json
 
-from pqc_collector.util import project_paths
+from pqc_collector.core import project_paths
 
 
 CONFIG_FILE_NAMES = {

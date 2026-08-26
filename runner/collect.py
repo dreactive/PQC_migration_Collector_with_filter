@@ -12,22 +12,21 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from pqc_collector.reports import report_schemas, write_schema_preview  # noqa: E402
-from pqc_collector.collector import store_search_page  # noqa: E402
-from pqc_collector.collector_reports import (  # noqa: E402
-    write_dedupe_summary_report,
-    write_query_pages_report,
-    write_raw_search_items_report,
-)
-from pqc_collector.database import connect, init_db  # noqa: E402
-from pqc_collector.github_client import GitHubClient  # noqa: E402
-from pqc_collector.raw_store import write_raw_response  # noqa: E402
-from pqc_collector.search_page_fetch import (  # noqa: E402
+from pqc_collector.core import ensure_dirs, project_paths  # noqa: E402
+from pqc_collector.collect import (  # noqa: E402
+    GitHubClient,
     collect_one_page_batch,
     fetch_search_page_raw,
     make_query,
 )
-from pqc_collector.util import ensure_dirs, project_paths  # noqa: E402
+from pqc_collector.reports import (  # noqa: E402
+    report_schemas,
+    write_dedupe_summary_report,
+    write_query_pages_report,
+    write_raw_search_items_report,
+    write_schema_preview,
+)
+from pqc_collector.storage import connect, init_db, store_search_page, write_raw_response  # noqa: E402
 
 
 def load_env_file(path):

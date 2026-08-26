@@ -1,2 +1,0 @@
-"""PQC migration collector package."""
-
