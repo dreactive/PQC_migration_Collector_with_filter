@@ -570,6 +570,38 @@ def write_f0_report(rows, batch_id, output_path=None, root=None):
     return report_path
 
 
+def summarize_f0_results(rows):
+    """Return pass/drop counts for F0 path quality results."""
+    summary = {
+        "total": 0,
+        "pass": 0,
+        "drop": 0,
+        "pass_by_source_kind": {},
+        "drop_by_source_kind": {},
+        "reason_counts": {},
+    }
+    for row in rows:
+        item = dict(row)
+        passed = bool(item["passed"])
+        source_kind = item.get("source_kind") or "unknown"
+        by_source_key = "pass_by_source_kind" if passed else "drop_by_source_kind"
+        count_key = "pass" if passed else "drop"
+        reason_codes = item.get("reason_codes", [])
+        if not reason_codes and item.get("reason_codes_json"):
+            reason_codes = json.loads(item["reason_codes_json"])
+
+        summary["total"] += 1
+        summary[count_key] += 1
+        summary[by_source_key][source_kind] = summary[by_source_key].get(source_kind, 0) + 1
+        for reason_code in reason_codes:
+            summary["reason_counts"][reason_code] = summary["reason_counts"].get(reason_code, 0) + 1
+
+    summary["pass_by_source_kind"] = dict(sorted(summary["pass_by_source_kind"].items()))
+    summary["drop_by_source_kind"] = dict(sorted(summary["drop_by_source_kind"].items()))
+    summary["reason_counts"] = dict(sorted(summary["reason_counts"].items()))
+    return summary
+
+
 def write_dedupe_summary_report(
     conn,
     batch_id,
