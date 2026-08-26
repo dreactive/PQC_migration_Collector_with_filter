@@ -1,4 +1,73 @@
-from pqc_collector.keys import normalize_path, repository_key, search_item_key
+from datetime import datetime, timezone
+
+from pqc_collector.keys import normalize_path, query_page_key, repository_key, search_item_key
+
+
+def upsert_query_page(
+    conn,
+    batch_id,
+    query,
+    page,
+    payload,
+    raw_path,
+    new_unique_item_count=0,
+    duplicate_item_count=0,
+    fetched_at=None,
+):
+    """Insert one query page row, or return the existing row without overwriting it."""
+    page_size = int(query["page_size"])
+    page_key = query_page_key(query["query_text"], page, page_size)
+    existing = conn.execute(
+        "SELECT * FROM query_pages WHERE query_page_key = ?",
+        (page_key,),
+    ).fetchone()
+    if existing:
+        row = dict(existing)
+        row["status"] = "existing"
+        return row
+
+    item_count = len(payload.get("items", []))
+    duplicate_ratio = duplicate_item_count / item_count if item_count else 0.0
+    checked_at = fetched_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    row = {
+        "query_page_key": page_key,
+        "batch_id": batch_id,
+        "query_key": query["query_key"],
+        "query_group": query["query_group"],
+        "page": int(page),
+        "page_size": page_size,
+        "total_count": int(payload.get("total_count", item_count)),
+        "item_count": item_count,
+        "new_unique_item_count": int(new_unique_item_count),
+        "duplicate_item_count": int(duplicate_item_count),
+        "duplicate_ratio": duplicate_ratio,
+        "raw_path": str(raw_path),
+        "fetched_at": checked_at,
+    }
+    conn.execute(
+        """
+        INSERT INTO query_pages (
+            query_page_key,
+            batch_id,
+            query_key,
+            query_group,
+            page,
+            page_size,
+            total_count,
+            item_count,
+            new_unique_item_count,
+            duplicate_item_count,
+            duplicate_ratio,
+            raw_path,
+            fetched_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        tuple(row.values()),
+    )
+    conn.commit()
+    row["status"] = "new"
+    return row
 
 
 def upsert_repository(conn, batch_id, repository):
