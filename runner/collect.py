@@ -1,5 +1,7 @@
 import argparse
+from datetime import datetime, timezone
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -18,7 +20,26 @@ from pqc_collector.collector_reports import (  # noqa: E402
     write_raw_search_items_report,
 )
 from pqc_collector.database import connect, init_db  # noqa: E402
+from pqc_collector.github_client import GitHubClient  # noqa: E402
+from pqc_collector.raw_store import write_raw_response  # noqa: E402
 from pqc_collector.util import ensure_dirs, project_paths  # noqa: E402
+
+
+def load_env_file(path):
+    """Load simple KEY=VALUE lines without printing secret values."""
+    loaded = []
+    if not path.exists():
+        return loaded
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key and key not in os.environ:
+            os.environ[key] = value.strip().strip('"').strip("'")
+            loaded.append(key)
+    return loaded
 
 
 def store_sample_search(batch_id):
@@ -157,6 +178,33 @@ def cleanup_sample_search(batch_id, apply=False):
     }
 
 
+def check_rate_limit(batch_id):
+    """Call GitHub /rate_limit once, store raw response, and return a summary."""
+    loaded_env_keys = load_env_file(PROJECT_ROOT / ".env")
+    token = os.environ.get("GITHUB_TOKEN")
+    base_url = os.environ.get("GITHUB_API_BASE") or "https://api.github.com"
+    client = GitHubClient(token=token, base_url=base_url)
+    response = client.rate_limit()
+    call_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    raw_path = write_raw_response(batch_id, "rate_limit", call_id, response, PROJECT_ROOT)
+    resources = response["payload"].get("resources", {})
+    search = resources.get("search", {})
+    core = resources.get("core", {})
+    return {
+        "batch_id": batch_id,
+        "status_code": response["status_code"],
+        "authenticated": bool(token),
+        "loaded_env_keys": sorted(loaded_env_keys),
+        "raw_path": str(raw_path),
+        "search_remaining": search.get("remaining"),
+        "search_limit": search.get("limit"),
+        "search_reset": search.get("reset"),
+        "core_remaining": core.get("remaining"),
+        "core_limit": core.get("limit"),
+        "core_reset": core.get("reset"),
+    }
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="PQC migration collector runner.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -197,6 +245,15 @@ def build_parser():
         action="store_true",
         help="Actually delete rows and batch directories. Omit for dry-run.",
     )
+    rate_limit = subparsers.add_parser(
+        "check-rate-limit",
+        help="Call GitHub /rate_limit once and store the raw response.",
+    )
+    rate_limit.add_argument(
+        "--batch-id",
+        default="batch-rate-limit",
+        help="Batch id used for the raw rate limit response.",
+    )
     return parser
 
 
@@ -225,6 +282,11 @@ def main(argv=None):
 
     if args.command == "cleanup-sample-search":
         result = cleanup_sample_search(args.batch_id, args.apply)
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "check-rate-limit":
+        result = check_rate_limit(args.batch_id)
         print(json.dumps(result, indent=2))
         return 0
 
