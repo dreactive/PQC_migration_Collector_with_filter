@@ -27,7 +27,13 @@ from pqc_collector.reports import (  # noqa: E402
     write_raw_search_items_report,
     write_schema_preview,
 )
-from pqc_collector.storage import connect, init_db, store_search_page, write_raw_response  # noqa: E402
+from pqc_collector.storage import (  # noqa: E402
+    connect,
+    get_next_unprocessed_f0_batch_id,
+    init_db,
+    store_search_page,
+    write_raw_response,
+)
 
 
 def load_env_file(path):
@@ -265,7 +271,13 @@ def build_parser():
     collect_page.add_argument("--page", default=1, type=int)
     collect_page.add_argument("--page-size", default=50, type=int)
     run_f0 = subparsers.add_parser("run-f0", help="Run F0 path quality filter for one batch.")
-    run_f0.add_argument("--batch-id", required=True)
+    f0_target = run_f0.add_mutually_exclusive_group(required=True)
+    f0_target.add_argument("--batch-id", help="Explicit batch id to process.")
+    f0_target.add_argument(
+        "--next",
+        action="store_true",
+        help="Process the oldest batch with raw items not fully processed by F0.",
+    )
     run_f0.add_argument("--limit", default=None, type=int)
     return parser
 
@@ -326,7 +338,25 @@ def main(argv=None):
         conn = connect(root=PROJECT_ROOT)
         try:
             init_db(conn)
-            result = run_f0_batch(conn, args.batch_id, args.limit, PROJECT_ROOT)
+            batch_id = args.batch_id
+            if args.next:
+                batch_id = get_next_unprocessed_f0_batch_id(conn)
+            if batch_id is None:
+                result = {
+                    "requested_batch_id": "next",
+                    "batch_id": None,
+                    "status": "no_unprocessed_f0_batch",
+                    "raw_item_count": 0,
+                    "processed_item_count": 0,
+                    "new_result_count": 0,
+                    "updated_result_count": 0,
+                    "report_paths": {},
+                    "summary": {},
+                    "sample_row": None,
+                }
+            else:
+                result = run_f0_batch(conn, batch_id, args.limit, PROJECT_ROOT)
+                result["requested_batch_id"] = "next" if args.next else args.batch_id
         finally:
             conn.close()
         print(json.dumps(result, indent=2))
