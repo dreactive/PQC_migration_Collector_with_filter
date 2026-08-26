@@ -85,3 +85,10 @@ def init_raw_search_items_table(conn):
         """
     )
     conn.commit()
+
+
+def init_db(conn):
+    """Create the collector storage schema without deleting existing data."""
+    init_query_pages_table(conn)
+    init_repositories_table(conn)
+    init_raw_search_items_table(conn)
