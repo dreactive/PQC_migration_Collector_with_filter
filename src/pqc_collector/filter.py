@@ -4,6 +4,8 @@ This module intentionally starts without pipeline logic. F0/F1/D0/F2 functions
 will be added here one minimum feature at a time.
 """
 
+from datetime import datetime, timezone
+
 from pqc_collector.core import normalize_path
 
 
@@ -174,4 +176,31 @@ def classify_path(path, rules=None):
         "source_kind": source_kind,
         "passed": passed,
         "reason_codes": reason_codes,
+    }
+
+
+def _item_value(item, key, default=None):
+    try:
+        value = item[key]
+    except (KeyError, TypeError, IndexError):
+        value = default
+    return default if value is None else value
+
+
+def run_f0_for_item(item, rules=None, checked_at=None):
+    """Build one F0 path quality result row from one raw search item."""
+    path = _item_value(item, "path", "")
+    normalized_path = _item_value(item, "normalized_path", normalize_path(path))
+    classification = classify_path(normalized_path or path, rules)
+    timestamp = checked_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return {
+        "batch_id": _item_value(item, "batch_id"),
+        "search_item_key": _item_value(item, "search_item_key"),
+        "repository_full_name": _item_value(item, "repository_full_name"),
+        "path": path,
+        "normalized_path": normalized_path,
+        "source_kind": classification["source_kind"],
+        "passed": classification["passed"],
+        "reason_codes": classification["reason_codes"],
+        "checked_at": timestamp,
     }
