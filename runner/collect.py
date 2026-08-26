@@ -19,6 +19,7 @@ from pqc_collector.collect import (  # noqa: E402
     fetch_search_page_raw,
     make_query,
 )
+from pqc_collector.pipeline import run_f0_batch  # noqa: E402
 from pqc_collector.reports import (  # noqa: E402
     report_schemas,
     write_dedupe_summary_report,
@@ -263,6 +264,9 @@ def build_parser():
     collect_page.add_argument("--query-text", required=True)
     collect_page.add_argument("--page", default=1, type=int)
     collect_page.add_argument("--page-size", default=50, type=int)
+    run_f0 = subparsers.add_parser("run-f0", help="Run F0 path quality filter for one batch.")
+    run_f0.add_argument("--batch-id", required=True)
+    run_f0.add_argument("--limit", default=None, type=int)
     return parser
 
 
@@ -315,6 +319,16 @@ def main(argv=None):
         load_env_file(PROJECT_ROOT / ".env")
         query = make_query(args.query_key, args.query_group, args.query_text, args.page_size)
         result = collect_one_page_batch(args.batch_id, query, args.page, PROJECT_ROOT)
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "run-f0":
+        conn = connect(root=PROJECT_ROOT)
+        try:
+            init_db(conn)
+            result = run_f0_batch(conn, args.batch_id, args.limit, PROJECT_ROOT)
+        finally:
+            conn.close()
         print(json.dumps(result, indent=2))
         return 0
 
