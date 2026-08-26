@@ -104,11 +104,33 @@ def init_raw_search_items_table(conn):
     conn.commit()
 
 
+def init_f0_results_table(conn):
+    """Create the F0 path quality result table."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS f0_results (
+            batch_id TEXT NOT NULL,
+            search_item_key TEXT NOT NULL,
+            repository_full_name TEXT NOT NULL,
+            path TEXT NOT NULL,
+            normalized_path TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            passed INTEGER NOT NULL,
+            reason_codes_json TEXT NOT NULL,
+            checked_at TEXT NOT NULL,
+            PRIMARY KEY (batch_id, search_item_key)
+        )
+        """
+    )
+    conn.commit()
+
+
 def init_db(conn):
     """Create the collector storage schema without deleting existing data."""
     init_query_pages_table(conn)
     init_repositories_table(conn)
     init_raw_search_items_table(conn)
+    init_f0_results_table(conn)
 
 
 def write_raw_response(batch_id, response_kind, response_key, payload, root=None):
@@ -401,3 +423,69 @@ def upsert_raw_search_item(conn, batch_id, query_key, query_page_key, item, raw_
         "last_seen_batch_id": batch_id,
         "raw_query_page_path": str(raw_query_page_path),
     }
+
+
+def upsert_f0_result(conn, batch_id, row):
+    """Insert or update one F0 path quality result row."""
+    existing = conn.execute(
+        """
+        SELECT 1 FROM f0_results
+        WHERE batch_id = ? AND search_item_key = ?
+        """,
+        (batch_id, row["search_item_key"]),
+    ).fetchone()
+    status = "updated" if existing else "new"
+    reason_codes = list(row.get("reason_codes", []))
+    checked_at = row.get("checked_at") or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    normalized_path = row.get("normalized_path") or normalize_path(row["path"])
+    values = {
+        "batch_id": batch_id,
+        "search_item_key": row["search_item_key"],
+        "repository_full_name": row["repository_full_name"],
+        "path": row["path"],
+        "normalized_path": normalized_path,
+        "source_kind": row["source_kind"],
+        "passed": bool(row["passed"]),
+        "reason_codes": reason_codes,
+        "checked_at": checked_at,
+    }
+
+    conn.execute(
+        """
+        INSERT INTO f0_results (
+            batch_id,
+            search_item_key,
+            repository_full_name,
+            path,
+            normalized_path,
+            source_kind,
+            passed,
+            reason_codes_json,
+            checked_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(batch_id, search_item_key) DO UPDATE SET
+            repository_full_name = excluded.repository_full_name,
+            path = excluded.path,
+            normalized_path = excluded.normalized_path,
+            source_kind = excluded.source_kind,
+            passed = excluded.passed,
+            reason_codes_json = excluded.reason_codes_json,
+            checked_at = excluded.checked_at
+        """,
+        (
+            values["batch_id"],
+            values["search_item_key"],
+            values["repository_full_name"],
+            values["path"],
+            values["normalized_path"],
+            values["source_kind"],
+            int(values["passed"]),
+            json.dumps(reason_codes, ensure_ascii=True, sort_keys=True),
+            values["checked_at"],
+        ),
+    )
+    conn.commit()
+
+    values["status"] = status
+    return values
