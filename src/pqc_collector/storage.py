@@ -462,6 +462,42 @@ def iter_raw_search_items(conn, batch_id, limit=None):
         yield dict(row)
 
 
+def get_next_unprocessed_f0_batch_id(conn):
+    """Return the oldest collected batch with raw items not yet processed by F0."""
+    row = conn.execute(
+        """
+        WITH raw_batches AS (
+            SELECT
+                raw_search_items.batch_id AS batch_id,
+                COUNT(DISTINCT raw_search_items.search_item_key) AS raw_count,
+                MIN(query_pages.fetched_at) AS first_fetched_at
+            FROM raw_search_items
+            INNER JOIN query_pages
+                ON query_pages.query_page_key = raw_search_items.query_page_key
+            GROUP BY raw_search_items.batch_id
+        ),
+        f0_batches AS (
+            SELECT
+                raw_search_items.batch_id AS batch_id,
+                COUNT(DISTINCT f0_results.search_item_key) AS f0_count
+            FROM raw_search_items
+            INNER JOIN f0_results
+                ON f0_results.batch_id = raw_search_items.batch_id
+                AND f0_results.search_item_key = raw_search_items.search_item_key
+            GROUP BY raw_search_items.batch_id
+        )
+        SELECT raw_batches.batch_id
+        FROM raw_batches
+        LEFT JOIN f0_batches
+            ON f0_batches.batch_id = raw_batches.batch_id
+        WHERE raw_batches.raw_count > COALESCE(f0_batches.f0_count, 0)
+        ORDER BY raw_batches.first_fetched_at ASC, raw_batches.batch_id ASC
+        LIMIT 1
+        """
+    ).fetchone()
+    return row["batch_id"] if row else None
+
+
 def upsert_f0_result(conn, batch_id, row):
     """Insert or update one F0 path quality result row."""
     existing = conn.execute(
