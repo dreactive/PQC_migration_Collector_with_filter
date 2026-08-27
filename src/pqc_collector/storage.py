@@ -498,6 +498,53 @@ def get_next_unprocessed_f0_batch_id(conn):
     return row["batch_id"] if row else None
 
 
+def iter_f0_passed_items(conn, batch_id, limit=None):
+    """Yield F0-passed raw search items as the file fetch queue."""
+    params = [batch_id]
+    limit_clause = ""
+    if limit is not None:
+        limit_clause = "LIMIT ?"
+        params.append(max(0, int(limit)))
+
+    rows = conn.execute(
+        f"""
+        SELECT
+            raw_search_items.batch_id AS batch_id,
+            raw_search_items.search_item_key AS search_item_key,
+            raw_search_items.query_key AS query_key,
+            raw_search_items.repository_key AS repository_key,
+            raw_search_items.repository_id AS repository_id,
+            raw_search_items.repository_full_name AS repository_full_name,
+            raw_search_items.repository_url AS repository_url,
+            raw_search_items.path AS path,
+            raw_search_items.normalized_path AS normalized_path,
+            raw_search_items.blob_sha AS blob_sha,
+            raw_search_items.file_api_url AS file_api_url,
+            raw_search_items.html_url AS html_url,
+            raw_search_items.raw_query_page_path AS raw_query_page_path,
+            f0_results.source_kind AS source_kind,
+            f0_results.reason_codes_json AS f0_reason_codes_json,
+            f0_results.checked_at AS f0_checked_at
+        FROM f0_results
+        INNER JOIN raw_search_items
+            ON raw_search_items.batch_id = f0_results.batch_id
+            AND raw_search_items.search_item_key = f0_results.search_item_key
+        WHERE f0_results.batch_id = ?
+            AND f0_results.passed = 1
+        ORDER BY
+            raw_search_items.repository_full_name,
+            raw_search_items.normalized_path,
+            raw_search_items.blob_sha
+        {limit_clause}
+        """,
+        tuple(params),
+    ).fetchall()
+    for row in rows:
+        item = dict(row)
+        item["f0_reason_codes"] = json.loads(item.pop("f0_reason_codes_json"))
+        yield item
+
+
 def upsert_f0_result(conn, batch_id, row):
     """Insert or update one F0 path quality result row."""
     existing = conn.execute(
