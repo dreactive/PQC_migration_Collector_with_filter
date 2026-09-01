@@ -3,13 +3,20 @@
 import hashlib
 
 from pqc_collector.core import file_key
-from pqc_collector.filter import run_f0_for_item
-from pqc_collector.reports import summarize_f0_results, write_f0_report
+from pqc_collector.filter import run_f0_for_item, run_f1
+from pqc_collector.reports import (
+    summarize_f0_results,
+    summarize_f1_results,
+    write_f0_report,
+    write_f1_report,
+)
 from pqc_collector.storage import (
     iter_f0_passed_items,
+    iter_files_for_f1,
     iter_raw_search_items,
     read_file_snapshot,
     upsert_f0_result,
+    upsert_f1_result,
     upsert_file_snapshot,
     write_raw_response,
 )
@@ -95,4 +102,47 @@ def fetch_file_batch(conn, batch_id, client, limit=None, root=None):
         "raw_file_paths": [row["raw_file_path"] for row in fetched_rows],
         "sample_fetched_row": fetched_rows[0] if fetched_rows else None,
         "sample_skipped_row": skipped_rows[0] if skipped_rows else None,
+    }
+
+
+def run_f1_batch(conn, batch_id, limit=None, root=None, configs=None, checked_at=None):
+    """Run F1 static candidate filtering for fetched F0-passed files."""
+    file_rows = list(iter_files_for_f1(conn, batch_id, limit))
+    f1_rows = []
+    new_result_count = 0
+    updated_result_count = 0
+
+    for file_row in file_rows:
+        f0_result = {
+            "passed": True,
+            "source_kind": file_row.get("source_kind"),
+            "reason_codes": file_row.get("f0_reason_codes", []),
+        }
+        f1_row = run_f1(
+            file_row,
+            f0_result=f0_result,
+            configs=configs,
+            checked_at=checked_at,
+        )
+        stored_row = upsert_f1_result(conn, batch_id, f1_row)
+        if stored_row["status"] == "new":
+            new_result_count += 1
+        else:
+            updated_result_count += 1
+        f1_rows.append(f1_row)
+
+    report_path = write_f1_report(f1_rows, batch_id, root=root)
+    summary = summarize_f1_results(f1_rows)
+    return {
+        "batch_id": batch_id,
+        "status": "completed",
+        "queued_file_count": len(file_rows),
+        "processed_file_count": len(f1_rows),
+        "new_result_count": new_result_count,
+        "updated_result_count": updated_result_count,
+        "report_paths": {
+            "filter_f1_static_candidate": str(report_path),
+        },
+        "summary": summary,
+        "sample_row": f1_rows[0] if f1_rows else None,
     }

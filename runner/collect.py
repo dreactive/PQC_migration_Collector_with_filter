@@ -19,7 +19,7 @@ from pqc_collector.collect import (  # noqa: E402
     fetch_search_page_raw,
     make_query,
 )
-from pqc_collector.pipeline import fetch_file_batch, run_f0_batch  # noqa: E402
+from pqc_collector.pipeline import fetch_file_batch, run_f0_batch, run_f1_batch  # noqa: E402
 from pqc_collector.reports import (  # noqa: E402
     report_schemas,
     write_dedupe_summary_report,
@@ -285,6 +285,12 @@ def build_parser():
     )
     fetch_files.add_argument("--batch-id", required=True)
     fetch_files.add_argument("--limit", default=None, type=int)
+    run_f1 = subparsers.add_parser(
+        "run-f1",
+        help="Run F1 static candidate filter for fetched F0-passed files.",
+    )
+    run_f1.add_argument("--batch-id", required=True)
+    run_f1.add_argument("--limit", default=None, type=int)
     return parser
 
 
@@ -377,6 +383,16 @@ def main(argv=None):
         try:
             init_db(conn)
             result = fetch_file_batch(conn, args.batch_id, client, args.limit, PROJECT_ROOT)
+        finally:
+            conn.close()
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "run-f1":
+        conn = connect(root=PROJECT_ROOT)
+        try:
+            init_db(conn)
+            result = run_f1_batch(conn, args.batch_id, args.limit, PROJECT_ROOT)
         finally:
             conn.close()
         print(json.dumps(result, indent=2))
