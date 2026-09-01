@@ -19,7 +19,7 @@ from pqc_collector.collect import (  # noqa: E402
     fetch_search_page_raw,
     make_query,
 )
-from pqc_collector.pipeline import run_f0_batch  # noqa: E402
+from pqc_collector.pipeline import fetch_file_batch, run_f0_batch  # noqa: E402
 from pqc_collector.reports import (  # noqa: E402
     report_schemas,
     write_dedupe_summary_report,
@@ -279,6 +279,12 @@ def build_parser():
         help="Process the oldest batch with raw items not fully processed by F0.",
     )
     run_f0.add_argument("--limit", default=None, type=int)
+    fetch_files = subparsers.add_parser(
+        "fetch-files",
+        help="Fetch file snapshots for F0-passed items in one batch.",
+    )
+    fetch_files.add_argument("--batch-id", required=True)
+    fetch_files.add_argument("--limit", default=None, type=int)
     return parser
 
 
@@ -357,6 +363,20 @@ def main(argv=None):
             else:
                 result = run_f0_batch(conn, batch_id, args.limit, PROJECT_ROOT)
                 result["requested_batch_id"] = "next" if args.next else args.batch_id
+        finally:
+            conn.close()
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "fetch-files":
+        load_env_file(PROJECT_ROOT / ".env")
+        token = os.environ.get("GITHUB_TOKEN")
+        base_url = os.environ.get("GITHUB_API_BASE") or "https://api.github.com"
+        client = GitHubClient(token=token, base_url=base_url)
+        conn = connect(root=PROJECT_ROOT)
+        try:
+            init_db(conn)
+            result = fetch_file_batch(conn, args.batch_id, client, args.limit, PROJECT_ROOT)
         finally:
             conn.close()
         print(json.dumps(result, indent=2))

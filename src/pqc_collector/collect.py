@@ -50,8 +50,11 @@ class GitHubClient:
         return headers
 
     def _url(self, path, params=None):
-        path = "/" + path.lstrip("/")
-        url = f"{self.base_url}{path}"
+        if str(path).startswith(("http://", "https://")):
+            url = str(path)
+        else:
+            path = "/" + path.lstrip("/")
+            url = f"{self.base_url}{path}"
         if params:
             url = f"{url}?{urlencode(params)}"
         return url
@@ -89,6 +92,10 @@ class GitHubClient:
                 "per_page": int(per_page),
             },
         )
+
+    def get_file(self, file_url):
+        """Fetch one GitHub contents API file response by its API URL."""
+        return self.get_json(file_url)
 
 
 def _resource_snapshot(resources, name):

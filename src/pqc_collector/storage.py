@@ -577,6 +577,29 @@ def iter_f0_passed_items(conn, batch_id, limit=None):
         yield item
 
 
+def read_file_snapshot(conn, key):
+    """Return one stored file snapshot summary by file key, if it exists."""
+    row = conn.execute(
+        """
+        SELECT
+            file_key,
+            repository_full_name,
+            path,
+            normalized_path,
+            blob_sha,
+            encoding,
+            content_size,
+            raw_file_path,
+            first_seen_batch_id,
+            last_seen_batch_id
+        FROM file_snapshots
+        WHERE file_key = ?
+        """,
+        (key,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def _file_payload(response):
     """Return a GitHub contents payload from either a raw payload or API wrapper."""
     if isinstance(response, dict) and "payload" in response:

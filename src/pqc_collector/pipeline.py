@@ -1,8 +1,18 @@
 """Batch pipeline orchestration for collector and filter stages."""
 
+import hashlib
+
+from pqc_collector.core import file_key
 from pqc_collector.filter import run_f0_for_item
 from pqc_collector.reports import summarize_f0_results, write_f0_report
-from pqc_collector.storage import iter_raw_search_items, upsert_f0_result
+from pqc_collector.storage import (
+    iter_f0_passed_items,
+    iter_raw_search_items,
+    read_file_snapshot,
+    upsert_f0_result,
+    upsert_file_snapshot,
+    write_raw_response,
+)
 
 
 def run_f0_batch(conn, batch_id, limit=None, root=None, rules=None, checked_at=None):
@@ -35,4 +45,54 @@ def run_f0_batch(conn, batch_id, limit=None, root=None, rules=None, checked_at=N
         },
         "summary": summary,
         "sample_row": f0_rows[0] if f0_rows else None,
+    }
+
+
+def _raw_file_response_key(item):
+    key = file_key(item["repository_id"], item["normalized_path"], item["blob_sha"])
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def fetch_file_batch(conn, batch_id, client, limit=None, root=None):
+    """Fetch and store file snapshots for F0-passed items in one batch."""
+    queue = list(iter_f0_passed_items(conn, batch_id, limit))
+    fetched_rows = []
+    skipped_rows = []
+    new_snapshot_count = 0
+    updated_snapshot_count = 0
+
+    for item in queue:
+        key = file_key(item["repository_id"], item["normalized_path"], item["blob_sha"])
+        existing = read_file_snapshot(conn, key)
+        if existing:
+            existing["status"] = "existing"
+            skipped_rows.append(existing)
+            continue
+
+        response = client.get_file(item["file_api_url"])
+        raw_path = write_raw_response(
+            batch_id,
+            "file",
+            _raw_file_response_key(item),
+            response,
+            root,
+        )
+        stored_row = upsert_file_snapshot(conn, batch_id, item, response, raw_path)
+        if stored_row["status"] == "new":
+            new_snapshot_count += 1
+        else:
+            updated_snapshot_count += 1
+        fetched_rows.append(stored_row)
+
+    return {
+        "batch_id": batch_id,
+        "status": "completed",
+        "queued_item_count": len(queue),
+        "fetched_item_count": len(fetched_rows),
+        "skipped_existing_count": len(skipped_rows),
+        "new_snapshot_count": new_snapshot_count,
+        "updated_snapshot_count": updated_snapshot_count,
+        "raw_file_paths": [row["raw_file_path"] for row in fetched_rows],
+        "sample_fetched_row": fetched_rows[0] if fetched_rows else None,
+        "sample_skipped_row": skipped_rows[0] if skipped_rows else None,
     }
