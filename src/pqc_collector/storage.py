@@ -600,6 +600,62 @@ def read_file_snapshot(conn, key):
     return dict(row) if row else None
 
 
+def iter_files_for_f1(conn, batch_id, limit=None):
+    """Yield fetched F0-passed file snapshots as the F1 input queue."""
+    params = [batch_id]
+    limit_clause = ""
+    if limit is not None:
+        limit_clause = "LIMIT ?"
+        params.append(max(0, int(limit)))
+
+    rows = conn.execute(
+        f"""
+        SELECT
+            raw_search_items.batch_id AS batch_id,
+            raw_search_items.search_item_key AS search_item_key,
+            raw_search_items.query_key AS query_key,
+            raw_search_items.repository_key AS repository_key,
+            raw_search_items.repository_id AS repository_id,
+            raw_search_items.repository_full_name AS repository_full_name,
+            raw_search_items.repository_url AS repository_url,
+            raw_search_items.path AS path,
+            raw_search_items.normalized_path AS normalized_path,
+            raw_search_items.blob_sha AS blob_sha,
+            raw_search_items.file_api_url AS file_api_url,
+            raw_search_items.html_url AS html_url,
+            f0_results.source_kind AS source_kind,
+            f0_results.reason_codes_json AS f0_reason_codes_json,
+            f0_results.checked_at AS f0_checked_at,
+            file_snapshots.file_key AS file_key,
+            file_snapshots.encoding AS encoding,
+            file_snapshots.content_text AS content_text,
+            file_snapshots.content_size AS content_size,
+            file_snapshots.raw_file_path AS raw_file_path,
+            file_snapshots.fetched_at AS file_fetched_at
+        FROM f0_results
+        INNER JOIN raw_search_items
+            ON raw_search_items.batch_id = f0_results.batch_id
+            AND raw_search_items.search_item_key = f0_results.search_item_key
+        INNER JOIN file_snapshots
+            ON file_snapshots.repository_id = raw_search_items.repository_id
+            AND file_snapshots.normalized_path = raw_search_items.normalized_path
+            AND file_snapshots.blob_sha = raw_search_items.blob_sha
+        WHERE f0_results.batch_id = ?
+            AND f0_results.passed = 1
+        ORDER BY
+            raw_search_items.repository_full_name,
+            raw_search_items.normalized_path,
+            raw_search_items.blob_sha
+        {limit_clause}
+        """,
+        tuple(params),
+    ).fetchall()
+    for row in rows:
+        item = dict(row)
+        item["f0_reason_codes"] = json.loads(item.pop("f0_reason_codes_json"))
+        yield item
+
+
 def _file_payload(response):
     """Return a GitHub contents payload from either a raw payload or API wrapper."""
     if isinstance(response, dict) and "payload" in response:
