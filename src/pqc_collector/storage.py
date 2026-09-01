@@ -156,6 +156,33 @@ def init_files_table(conn):
     conn.commit()
 
 
+def init_f1_results_table(conn):
+    """Create the F1 static candidate result table."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS f1_results (
+            batch_id TEXT NOT NULL,
+            search_item_key TEXT NOT NULL,
+            file_key TEXT NOT NULL,
+            path TEXT NOT NULL,
+            language TEXT,
+            passed INTEGER NOT NULL,
+            target_libraries_json TEXT NOT NULL,
+            matched_library_signals_json TEXT NOT NULL,
+            matched_pqc_api_signals_json TEXT NOT NULL,
+            matched_provider_signals_json TEXT NOT NULL,
+            quality_json TEXT NOT NULL,
+            reason_codes_json TEXT NOT NULL,
+            raw_file_path TEXT NOT NULL,
+            checked_at TEXT NOT NULL,
+            PRIMARY KEY (batch_id, search_item_key),
+            FOREIGN KEY (file_key) REFERENCES file_snapshots (file_key)
+        )
+        """
+    )
+    conn.commit()
+
+
 def init_db(conn):
     """Create the collector storage schema without deleting existing data."""
     init_query_pages_table(conn)
@@ -163,6 +190,7 @@ def init_db(conn):
     init_raw_search_items_table(conn)
     init_f0_results_table(conn)
     init_files_table(conn)
+    init_f1_results_table(conn)
 
 
 def write_raw_response(batch_id, response_kind, response_key, payload, root=None):
@@ -818,6 +846,90 @@ def upsert_f0_result(conn, batch_id, row):
             values["source_kind"],
             int(values["passed"]),
             json.dumps(reason_codes, ensure_ascii=True, sort_keys=True),
+            values["checked_at"],
+        ),
+    )
+    conn.commit()
+
+    values["status"] = status
+    return values
+
+
+def upsert_f1_result(conn, batch_id, row):
+    """Insert or update one F1 static candidate result row."""
+    existing = conn.execute(
+        """
+        SELECT 1 FROM f1_results
+        WHERE batch_id = ? AND search_item_key = ?
+        """,
+        (batch_id, row["search_item_key"]),
+    ).fetchone()
+    status = "updated" if existing else "new"
+    values = {
+        "batch_id": batch_id,
+        "search_item_key": row["search_item_key"],
+        "file_key": row["file_key"],
+        "path": row["path"],
+        "language": row.get("language"),
+        "passed": bool(row["passed"]),
+        "target_libraries": list(row.get("target_libraries", [])),
+        "matched_library_signals": list(row.get("matched_library_signals", [])),
+        "matched_pqc_api_signals": list(row.get("matched_pqc_api_signals", [])),
+        "matched_provider_signals": list(row.get("matched_provider_signals", [])),
+        "quality": dict(row.get("quality", {})),
+        "reason_codes": list(row.get("reason_codes", [])),
+        "raw_file_path": row["raw_file_path"],
+        "checked_at": row.get("checked_at")
+        or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+    conn.execute(
+        """
+        INSERT INTO f1_results (
+            batch_id,
+            search_item_key,
+            file_key,
+            path,
+            language,
+            passed,
+            target_libraries_json,
+            matched_library_signals_json,
+            matched_pqc_api_signals_json,
+            matched_provider_signals_json,
+            quality_json,
+            reason_codes_json,
+            raw_file_path,
+            checked_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(batch_id, search_item_key) DO UPDATE SET
+            file_key = excluded.file_key,
+            path = excluded.path,
+            language = excluded.language,
+            passed = excluded.passed,
+            target_libraries_json = excluded.target_libraries_json,
+            matched_library_signals_json = excluded.matched_library_signals_json,
+            matched_pqc_api_signals_json = excluded.matched_pqc_api_signals_json,
+            matched_provider_signals_json = excluded.matched_provider_signals_json,
+            quality_json = excluded.quality_json,
+            reason_codes_json = excluded.reason_codes_json,
+            raw_file_path = excluded.raw_file_path,
+            checked_at = excluded.checked_at
+        """,
+        (
+            values["batch_id"],
+            values["search_item_key"],
+            values["file_key"],
+            values["path"],
+            values["language"],
+            int(values["passed"]),
+            json.dumps(values["target_libraries"], ensure_ascii=True, sort_keys=True),
+            json.dumps(values["matched_library_signals"], ensure_ascii=True, sort_keys=True),
+            json.dumps(values["matched_pqc_api_signals"], ensure_ascii=True, sort_keys=True),
+            json.dumps(values["matched_provider_signals"], ensure_ascii=True, sort_keys=True),
+            json.dumps(values["quality"], ensure_ascii=True, sort_keys=True),
+            json.dumps(values["reason_codes"], ensure_ascii=True, sort_keys=True),
+            values["raw_file_path"],
             values["checked_at"],
         ),
     )
