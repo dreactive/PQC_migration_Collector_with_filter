@@ -280,6 +280,23 @@ def _strong_pqc_rules(config=None):
     return direct, near
 
 
+def _unique_values(values):
+    seen = set()
+    unique = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        unique.append(value)
+    return unique
+
+
+def _config_section(configs, name):
+    if not configs:
+        return None
+    return configs.get(name, configs)
+
+
 def find_target_library_signals(path, content, config=None):
     """Return target legacy library signal matches for one fetched file."""
     language = detect_language(path, content)
@@ -358,6 +375,94 @@ def find_strong_pqc_signals(content, config=None):
             }
         )
     return matches
+
+
+def _f0_passed(file_row, f0_result=None):
+    if f0_result is not None and "passed" in f0_result:
+        return bool(f0_result["passed"])
+    source_kind = _item_value(file_row, "source_kind")
+    return bool(source_kind and source_kind not in DROP_SOURCE_KINDS and source_kind != "unknown")
+
+
+def _quality_summary(file_row, f0_result=None):
+    source_kind = _item_value(f0_result, "source_kind", _item_value(file_row, "source_kind"))
+    return {
+        "source_kind": source_kind,
+        "is_docs": source_kind == "docs",
+        "is_vendor_or_generated": source_kind == "vendor_or_generated",
+        "is_test": source_kind == "test",
+        "is_example": source_kind == "example",
+        "is_fuzz_or_benchmark": source_kind == "fuzz_or_benchmark",
+    }
+
+
+def run_f1(file_row, f0_result=None, configs=None, checked_at=None):
+    """Build one F1 static candidate result row from a fetched file snapshot."""
+    path = _item_value(file_row, "path", "")
+    content = _item_value(file_row, "content_text", "")
+    language = detect_language(path, content)
+    f0_passed = _f0_passed(file_row, f0_result)
+    if f0_passed and language:
+        library_matches = find_target_library_signals(
+            path,
+            content,
+            _config_section(configs, "target_libraries"),
+        )
+        strong_matches = find_strong_pqc_signals(
+            content,
+            _config_section(configs, "strong_pqc_signals"),
+        )
+    else:
+        library_matches = []
+        strong_matches = []
+    pqc_api_signals = [
+        match["signal"]
+        for match in strong_matches
+        if match.get("signal_type") != "provider"
+    ]
+    provider_signals = [
+        match["near"] or match["signal"]
+        for match in strong_matches
+        if match.get("signal_type") == "provider"
+    ]
+    reason_codes = []
+
+    if not f0_passed:
+        reason_codes.append("drop_f0_failed")
+    if language is None:
+        reason_codes.append("drop_unsupported_language")
+    if library_matches:
+        reason_codes.append("target_library_signal_detected")
+    else:
+        reason_codes.append("drop_no_target_library_signal")
+    if strong_matches:
+        reason_codes.append("strong_pqc_api_signal_detected")
+    else:
+        reason_codes.append("drop_no_strong_pqc_signal")
+    if provider_signals:
+        reason_codes.append("provider_signal_detected")
+
+    passed = f0_passed and bool(language) and bool(library_matches) and bool(strong_matches)
+    reason_codes.append("f1_pass" if passed else "f1_drop")
+    timestamp = checked_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return {
+        "batch_id": _item_value(file_row, "batch_id"),
+        "search_item_key": _item_value(file_row, "search_item_key"),
+        "file_key": _item_value(file_row, "file_key"),
+        "path": path,
+        "language": language,
+        "passed": passed,
+        "target_libraries": _unique_values(
+            match["target_library"] for match in library_matches
+        ),
+        "matched_library_signals": _unique_values(match["signal"] for match in library_matches),
+        "matched_pqc_api_signals": _unique_values(pqc_api_signals),
+        "matched_provider_signals": _unique_values(provider_signals),
+        "quality": _quality_summary(file_row, f0_result),
+        "reason_codes": reason_codes,
+        "raw_file_path": _item_value(file_row, "raw_file_path"),
+        "checked_at": timestamp,
+    }
 
 
 def is_documentation_path(path):
