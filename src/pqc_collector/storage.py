@@ -35,6 +35,16 @@ def connect(path=None, root=None):
     return conn
 
 
+def _ensure_columns(conn, table, columns):
+    existing = {
+        row["name"]
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    for name, definition in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+
 def init_query_pages_table(conn):
     """Create the query page storage table."""
     conn.execute(
@@ -171,6 +181,8 @@ def init_f1_results_table(conn):
             matched_library_signals_json TEXT NOT NULL,
             matched_pqc_api_signals_json TEXT NOT NULL,
             matched_provider_signals_json TEXT NOT NULL,
+            library_evidence_json TEXT NOT NULL DEFAULT '[]',
+            strong_signal_evidence_json TEXT NOT NULL DEFAULT '[]',
             quality_json TEXT NOT NULL,
             reason_codes_json TEXT NOT NULL,
             raw_file_path TEXT NOT NULL,
@@ -179,6 +191,14 @@ def init_f1_results_table(conn):
             FOREIGN KEY (file_key) REFERENCES file_snapshots (file_key)
         )
         """
+    )
+    _ensure_columns(
+        conn,
+        "f1_results",
+        {
+            "library_evidence_json": "TEXT NOT NULL DEFAULT '[]'",
+            "strong_signal_evidence_json": "TEXT NOT NULL DEFAULT '[]'",
+        },
     )
     conn.commit()
 
@@ -876,6 +896,8 @@ def upsert_f1_result(conn, batch_id, row):
         "matched_library_signals": list(row.get("matched_library_signals", [])),
         "matched_pqc_api_signals": list(row.get("matched_pqc_api_signals", [])),
         "matched_provider_signals": list(row.get("matched_provider_signals", [])),
+        "library_evidence": list(row.get("library_evidence", [])),
+        "strong_signal_evidence": list(row.get("strong_signal_evidence", [])),
         "quality": dict(row.get("quality", {})),
         "reason_codes": list(row.get("reason_codes", [])),
         "raw_file_path": row["raw_file_path"],
@@ -896,12 +918,14 @@ def upsert_f1_result(conn, batch_id, row):
             matched_library_signals_json,
             matched_pqc_api_signals_json,
             matched_provider_signals_json,
+            library_evidence_json,
+            strong_signal_evidence_json,
             quality_json,
             reason_codes_json,
             raw_file_path,
             checked_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(batch_id, search_item_key) DO UPDATE SET
             file_key = excluded.file_key,
             path = excluded.path,
@@ -911,6 +935,8 @@ def upsert_f1_result(conn, batch_id, row):
             matched_library_signals_json = excluded.matched_library_signals_json,
             matched_pqc_api_signals_json = excluded.matched_pqc_api_signals_json,
             matched_provider_signals_json = excluded.matched_provider_signals_json,
+            library_evidence_json = excluded.library_evidence_json,
+            strong_signal_evidence_json = excluded.strong_signal_evidence_json,
             quality_json = excluded.quality_json,
             reason_codes_json = excluded.reason_codes_json,
             raw_file_path = excluded.raw_file_path,
@@ -927,6 +953,8 @@ def upsert_f1_result(conn, batch_id, row):
             json.dumps(values["matched_library_signals"], ensure_ascii=True, sort_keys=True),
             json.dumps(values["matched_pqc_api_signals"], ensure_ascii=True, sort_keys=True),
             json.dumps(values["matched_provider_signals"], ensure_ascii=True, sort_keys=True),
+            json.dumps(values["library_evidence"], ensure_ascii=True, sort_keys=True),
+            json.dumps(values["strong_signal_evidence"], ensure_ascii=True, sort_keys=True),
             json.dumps(values["quality"], ensure_ascii=True, sort_keys=True),
             json.dumps(values["reason_codes"], ensure_ascii=True, sort_keys=True),
             values["raw_file_path"],

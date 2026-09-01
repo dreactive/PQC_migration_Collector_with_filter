@@ -267,6 +267,23 @@ def _signal_context(content, index, size=NEAR_CONTEXT_CHARS):
     return content[start:end].strip()
 
 
+def _line_number_at(content, index):
+    if index < 0:
+        return None
+    return str(content or "").count("\n", 0, index) + 1
+
+
+def _line_context_at(content, index):
+    text = str(content or "")
+    if index < 0:
+        return ""
+    line_start = text.rfind("\n", 0, index) + 1
+    line_end = text.find("\n", index)
+    if line_end < 0:
+        line_end = len(text)
+    return text[line_start:line_end].strip()
+
+
 def _find_signal_index(content, signal):
     return content.lower().find(signal.lower())
 
@@ -300,12 +317,14 @@ def _config_section(configs, name):
 def find_target_library_signals(path, content, config=None):
     """Return target legacy library signal matches for one fetched file."""
     language = detect_language(path, content)
+    content = content or ""
     matches = []
     seen = set()
     for library, signal, languages in _iter_library_signal_rules(config):
         if languages and language not in languages:
             continue
-        if not _contains_signal(content or "", signal):
+        index = _find_signal_index(content, signal)
+        if index < 0:
             continue
         key = (library, signal.lower())
         if key in seen:
@@ -318,6 +337,9 @@ def find_target_library_signals(path, content, config=None):
                 "matched_text": signal,
                 "language": language,
                 "source": "content",
+                "source_field": "content_text",
+                "line_number": _line_number_at(content, index),
+                "context": _line_context_at(content, index),
             }
         )
     return matches
@@ -342,7 +364,9 @@ def find_strong_pqc_signals(content, config=None):
                 "matched_text": signal,
                 "signal_type": signal_type,
                 "near": None,
+                "line_number": _line_number_at(content, index),
                 "context": _signal_context(content, index),
+                "source_field": "content_text",
             }
         )
 
@@ -371,10 +395,16 @@ def find_strong_pqc_signals(content, config=None):
                 "matched_text": signal,
                 "signal_type": signal_type,
                 "near": near_signal,
+                "line_number": _line_number_at(content, signal_index),
                 "context": context,
+                "source_field": "content_text",
             }
         )
     return matches
+
+
+def _with_raw_path(evidence, raw_path):
+    return [{**item, "raw_path": raw_path} for item in evidence]
 
 
 def _f0_passed(file_row, f0_result=None):
@@ -445,6 +475,7 @@ def run_f1(file_row, f0_result=None, configs=None, checked_at=None):
     passed = f0_passed and bool(language) and bool(library_matches) and bool(strong_matches)
     reason_codes.append("f1_pass" if passed else "f1_drop")
     timestamp = checked_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    raw_file_path = _item_value(file_row, "raw_file_path")
     return {
         "batch_id": _item_value(file_row, "batch_id"),
         "search_item_key": _item_value(file_row, "search_item_key"),
@@ -458,9 +489,11 @@ def run_f1(file_row, f0_result=None, configs=None, checked_at=None):
         "matched_library_signals": _unique_values(match["signal"] for match in library_matches),
         "matched_pqc_api_signals": _unique_values(pqc_api_signals),
         "matched_provider_signals": _unique_values(provider_signals),
+        "library_evidence": _with_raw_path(library_matches, raw_file_path),
+        "strong_signal_evidence": _with_raw_path(strong_matches, raw_file_path),
         "quality": _quality_summary(file_row, f0_result),
         "reason_codes": reason_codes,
-        "raw_file_path": _item_value(file_row, "raw_file_path"),
+        "raw_file_path": raw_file_path,
         "checked_at": timestamp,
     }
 

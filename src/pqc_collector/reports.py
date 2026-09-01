@@ -170,6 +170,8 @@ REPORT_SCHEMAS = {
             "matched_library_signals",
             "matched_pqc_api_signals",
             "matched_provider_signals",
+            "library_evidence",
+            "strong_signal_evidence",
             "quality",
             "reason_codes",
             "raw_file_path",
@@ -599,6 +601,120 @@ def summarize_f0_results(rows):
     summary["pass_by_source_kind"] = dict(sorted(summary["pass_by_source_kind"].items()))
     summary["drop_by_source_kind"] = dict(sorted(summary["drop_by_source_kind"].items()))
     summary["reason_counts"] = dict(sorted(summary["reason_counts"].items()))
+    return summary
+
+
+def _json_list_field(item, key):
+    value = item.get(key, [])
+    if value:
+        return list(value)
+    json_value = item.get(f"{key}_json")
+    return json.loads(json_value) if json_value else []
+
+
+def _json_dict_field(item, key):
+    value = item.get(key, {})
+    if value:
+        return dict(value)
+    json_value = item.get(f"{key}_json")
+    return json.loads(json_value) if json_value else {}
+
+
+def normalize_f1_report_row(batch_id, row):
+    """Return one F1 report row with the public JSONL schema."""
+    item = dict(row)
+    return {
+        "batch_id": batch_id,
+        "search_item_key": item["search_item_key"],
+        "file_key": item["file_key"],
+        "path": item["path"],
+        "language": item.get("language"),
+        "passed": bool(item["passed"]),
+        "target_libraries": _json_list_field(item, "target_libraries"),
+        "matched_library_signals": _json_list_field(item, "matched_library_signals"),
+        "matched_pqc_api_signals": _json_list_field(item, "matched_pqc_api_signals"),
+        "matched_provider_signals": _json_list_field(item, "matched_provider_signals"),
+        "library_evidence": _json_list_field(item, "library_evidence"),
+        "strong_signal_evidence": _json_list_field(item, "strong_signal_evidence"),
+        "quality": _json_dict_field(item, "quality"),
+        "reason_codes": _json_list_field(item, "reason_codes"),
+        "raw_file_path": item["raw_file_path"],
+        "checked_at": item["checked_at"],
+    }
+
+
+def write_f1_report(rows, batch_id, output_path=None, root=None):
+    """Write F1 static candidate rows for one batch as JSONL."""
+    report_path = output_path or report_paths(batch_id, root)["filter"]["filter_f1_static_candidate"]
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    normalized_rows = []
+    for row in rows:
+        item = dict(row)
+        if item.get("batch_id", batch_id) == batch_id:
+            normalized_rows.append(normalize_f1_report_row(batch_id, item))
+    normalized_rows.sort(key=lambda row: (row["passed"], row["language"] or "", row["path"]))
+
+    with report_path.open("w", encoding="utf-8") as handle:
+        for row in normalized_rows:
+            handle.write(json.dumps(row, ensure_ascii=True, sort_keys=True))
+            handle.write("\n")
+    return report_path
+
+
+def summarize_f1_results(rows):
+    """Return pass/drop counts for F1 static candidate results."""
+    summary = {
+        "total": 0,
+        "pass": 0,
+        "drop": 0,
+        "pass_by_language": {},
+        "drop_by_language": {},
+        "target_library_counts": {},
+        "pqc_api_signal_counts": {},
+        "provider_signal_counts": {},
+        "library_evidence_count": 0,
+        "strong_signal_evidence_count": 0,
+        "reason_counts": {},
+    }
+    for row in rows:
+        item = dict(row)
+        passed = bool(item["passed"])
+        count_key = "pass" if passed else "drop"
+        language_key = "pass_by_language" if passed else "drop_by_language"
+        language = item.get("language") or "unsupported"
+        target_libraries = _json_list_field(item, "target_libraries")
+        pqc_signals = _json_list_field(item, "matched_pqc_api_signals")
+        provider_signals = _json_list_field(item, "matched_provider_signals")
+        library_evidence = _json_list_field(item, "library_evidence")
+        strong_signal_evidence = _json_list_field(item, "strong_signal_evidence")
+        reason_codes = _json_list_field(item, "reason_codes")
+
+        summary["total"] += 1
+        summary[count_key] += 1
+        summary[language_key][language] = summary[language_key].get(language, 0) + 1
+        summary["library_evidence_count"] += len(library_evidence)
+        summary["strong_signal_evidence_count"] += len(strong_signal_evidence)
+        for target_library in target_libraries:
+            counts = summary["target_library_counts"]
+            counts[target_library] = counts.get(target_library, 0) + 1
+        for signal in pqc_signals:
+            counts = summary["pqc_api_signal_counts"]
+            counts[signal] = counts.get(signal, 0) + 1
+        for signal in provider_signals:
+            counts = summary["provider_signal_counts"]
+            counts[signal] = counts.get(signal, 0) + 1
+        for reason_code in reason_codes:
+            summary["reason_counts"][reason_code] = summary["reason_counts"].get(reason_code, 0) + 1
+
+    for key in (
+        "pass_by_language",
+        "drop_by_language",
+        "target_library_counts",
+        "pqc_api_signal_counts",
+        "provider_signal_counts",
+        "reason_counts",
+    ):
+        summary[key] = dict(sorted(summary[key].items()))
     return summary
 
 
