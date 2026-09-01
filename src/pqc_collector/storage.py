@@ -1,9 +1,11 @@
+import base64
 import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
 from pqc_collector.core import (
+    file_key,
     normalize_path,
     project_paths,
     query_page_key,
@@ -125,12 +127,42 @@ def init_f0_results_table(conn):
     conn.commit()
 
 
+def init_files_table(conn):
+    """Create the fetched file snapshot table."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS file_snapshots (
+            file_key TEXT PRIMARY KEY,
+            repository_key TEXT NOT NULL,
+            repository_id INTEGER NOT NULL,
+            repository_full_name TEXT NOT NULL,
+            path TEXT NOT NULL,
+            normalized_path TEXT NOT NULL,
+            blob_sha TEXT NOT NULL,
+            file_api_url TEXT NOT NULL,
+            html_url TEXT NOT NULL,
+            download_url TEXT,
+            encoding TEXT NOT NULL,
+            content_text TEXT NOT NULL,
+            content_size INTEGER NOT NULL,
+            raw_file_path TEXT NOT NULL,
+            first_seen_batch_id TEXT NOT NULL,
+            last_seen_batch_id TEXT NOT NULL,
+            fetched_at TEXT NOT NULL,
+            FOREIGN KEY (repository_key) REFERENCES repositories (repository_key)
+        )
+        """
+    )
+    conn.commit()
+
+
 def init_db(conn):
     """Create the collector storage schema without deleting existing data."""
     init_query_pages_table(conn)
     init_repositories_table(conn)
     init_raw_search_items_table(conn)
     init_f0_results_table(conn)
+    init_files_table(conn)
 
 
 def write_raw_response(batch_id, response_kind, response_key, payload, root=None):
@@ -543,6 +575,111 @@ def iter_f0_passed_items(conn, batch_id, limit=None):
         item = dict(row)
         item["f0_reason_codes"] = json.loads(item.pop("f0_reason_codes_json"))
         yield item
+
+
+def _file_payload(response):
+    """Return a GitHub contents payload from either a raw payload or API wrapper."""
+    if isinstance(response, dict) and "payload" in response:
+        return response["payload"]
+    return response
+
+
+def _decode_file_content(payload):
+    """Decode the textual content from one GitHub contents payload."""
+    encoding = (payload.get("encoding") or "plain").lower()
+    content = payload.get("content") or ""
+    if encoding == "base64":
+        compact_content = "".join(str(content).split())
+        return base64.b64decode(compact_content).decode("utf-8", errors="replace")
+    return str(content)
+
+
+def upsert_file_snapshot(conn, batch_id, item, response, raw_path, fetched_at=None):
+    """Insert or update one fetched file snapshot without duplicating the blob."""
+    payload = _file_payload(response)
+    normalized_path = normalize_path(item["path"])
+    key = file_key(item["repository_id"], normalized_path, item["blob_sha"])
+    existing = conn.execute(
+        "SELECT first_seen_batch_id FROM file_snapshots WHERE file_key = ?",
+        (key,),
+    ).fetchone()
+    status = "existing" if existing else "new"
+    first_seen_batch_id = existing["first_seen_batch_id"] if existing else batch_id
+    checked_at = fetched_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    content_text = _decode_file_content(payload)
+    content_size = int(payload.get("size") or len(content_text.encode("utf-8")))
+    row = {
+        "file_key": key,
+        "repository_key": item["repository_key"],
+        "repository_id": int(item["repository_id"]),
+        "repository_full_name": item["repository_full_name"],
+        "path": item["path"],
+        "normalized_path": normalized_path,
+        "blob_sha": item["blob_sha"],
+        "file_api_url": item["file_api_url"],
+        "html_url": item["html_url"],
+        "download_url": payload.get("download_url"),
+        "encoding": payload.get("encoding") or "plain",
+        "content_text": content_text,
+        "content_size": content_size,
+        "raw_file_path": str(raw_path),
+        "first_seen_batch_id": first_seen_batch_id,
+        "last_seen_batch_id": batch_id,
+        "fetched_at": checked_at,
+    }
+
+    conn.execute(
+        """
+        INSERT INTO file_snapshots (
+            file_key,
+            repository_key,
+            repository_id,
+            repository_full_name,
+            path,
+            normalized_path,
+            blob_sha,
+            file_api_url,
+            html_url,
+            download_url,
+            encoding,
+            content_text,
+            content_size,
+            raw_file_path,
+            first_seen_batch_id,
+            last_seen_batch_id,
+            fetched_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(file_key) DO UPDATE SET
+            repository_full_name = excluded.repository_full_name,
+            file_api_url = excluded.file_api_url,
+            html_url = excluded.html_url,
+            download_url = excluded.download_url,
+            encoding = excluded.encoding,
+            content_text = excluded.content_text,
+            content_size = excluded.content_size,
+            raw_file_path = excluded.raw_file_path,
+            last_seen_batch_id = excluded.last_seen_batch_id,
+            fetched_at = excluded.fetched_at
+        """,
+        tuple(row.values()),
+    )
+    conn.commit()
+
+    return {
+        "status": status,
+        "file_key": key,
+        "repository_full_name": row["repository_full_name"],
+        "path": row["path"],
+        "normalized_path": row["normalized_path"],
+        "blob_sha": row["blob_sha"],
+        "encoding": row["encoding"],
+        "content_size": row["content_size"],
+        "content_text_length": len(content_text),
+        "raw_file_path": row["raw_file_path"],
+        "first_seen_batch_id": first_seen_batch_id,
+        "last_seen_batch_id": batch_id,
+    }
 
 
 def upsert_f0_result(conn, batch_id, row):

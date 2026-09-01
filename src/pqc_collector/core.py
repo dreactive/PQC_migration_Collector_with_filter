@@ -76,3 +76,8 @@ def repository_key(repository_id):
 def search_item_key(repository_id, path, blob_sha):
     """Return the stable dedupe key for one GitHub code search item."""
     return f"github_code:{int(repository_id)}:{normalize_path(path)}:{str(blob_sha)}"
+
+
+def file_key(repository_id, path, blob_sha):
+    """Return the stable dedupe key for one fetched GitHub file snapshot."""
+    return f"github_file:{int(repository_id)}:{normalize_path(path)}:{str(blob_sha)}"
