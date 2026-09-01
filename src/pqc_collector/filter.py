@@ -114,6 +114,54 @@ DEFAULT_TARGET_LIBRARY_SIGNALS = {
         ],
     },
 }
+NEAR_CONTEXT_CHARS = 120
+DEFAULT_STRONG_PQC_DIRECT_SIGNALS = {
+    "BouncyCastlePQCProvider": "pqc_api",
+    "MLKEMParameterSpec": "pqc_api",
+    "MLDSAParameterSpec": "pqc_api",
+    "wc_MlKemKey_": "pqc_api",
+    "WC_ML_KEM": "pqc_api",
+    "OQS_KEM_new": "pqc_api",
+    "OQS_KEM_encaps": "pqc_api",
+    "OQS_KEM_decaps": "pqc_api",
+    "OQS_SIG_new": "pqc_api",
+    "OQS_SIG_sign": "pqc_api",
+    "OQS_SIG_verify": "pqc_api",
+    "X25519MLKEM768": "pqc_group",
+    "SecP256r1MLKEM768": "pqc_group",
+}
+DEFAULT_STRONG_PQC_NEAR_RULES = [
+    {
+        "signal": "EVP_PKEY_CTX_new_from_name",
+        "near": ["ML-KEM", "MLKEM", "ML-DSA", "MLDSA"],
+        "signal_type": "pqc_api",
+    },
+    {
+        "signal": "EVP_PKEY_encapsulate",
+        "near": ["ML-KEM", "MLKEM", "KEM"],
+        "signal_type": "pqc_api",
+    },
+    {
+        "signal": "EVP_PKEY_decapsulate",
+        "near": ["ML-KEM", "MLKEM", "KEM"],
+        "signal_type": "pqc_api",
+    },
+    {
+        "signal": "SSL_CTX_set1_groups",
+        "near": ["X25519MLKEM768", "SecP256r1MLKEM768", "MLKEM"],
+        "signal_type": "pqc_group",
+    },
+    {
+        "signal": "SSL_set1_groups",
+        "near": ["X25519MLKEM768", "SecP256r1MLKEM768", "MLKEM"],
+        "signal_type": "pqc_group",
+    },
+    {
+        "signal": "OSSL_PROVIDER_load",
+        "near": ["oqsprovider", "oqs-provider", "oqs"],
+        "signal_type": "provider",
+    },
+]
 
 
 def _path_parts(path):
@@ -153,6 +201,85 @@ def _contains_signal(content, signal):
     return signal.lower() in content.lower()
 
 
+def strip_code_comments(content):
+    """Remove common code comments while preserving string literals."""
+    text = str(content or "")
+    output = []
+    index = 0
+    quote = None
+    escaped = False
+
+    while index < len(text):
+        char = text[index]
+        next_char = text[index + 1] if index + 1 < len(text) else ""
+
+        if quote:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            index += 1
+            continue
+
+        if char in {"'", '"', "`"}:
+            quote = char
+            output.append(char)
+            index += 1
+            continue
+
+        if char == "/" and next_char == "/":
+            index += 2
+            while index < len(text) and text[index] not in "\r\n":
+                index += 1
+            continue
+
+        if char == "#":
+            index += 1
+            while index < len(text) and text[index] not in "\r\n":
+                index += 1
+            continue
+
+        if char == "/" and next_char == "*":
+            output.append(" ")
+            index += 2
+            while index < len(text) - 1:
+                if text[index] == "*" and text[index + 1] == "/":
+                    index += 2
+                    break
+                if text[index] in "\r\n":
+                    output.append(text[index])
+                index += 1
+            output.append(" ")
+            continue
+
+        output.append(char)
+        index += 1
+
+    return "".join(output)
+
+
+def _signal_context(content, index, size=NEAR_CONTEXT_CHARS):
+    start = max(0, index - size)
+    end = min(len(content), index + size)
+    return content[start:end].strip()
+
+
+def _find_signal_index(content, signal):
+    return content.lower().find(signal.lower())
+
+
+def _strong_pqc_rules(config=None):
+    if not config:
+        return DEFAULT_STRONG_PQC_DIRECT_SIGNALS, DEFAULT_STRONG_PQC_NEAR_RULES
+    rules = config.get("strong_pqc_signals", config)
+    direct = rules.get("direct", DEFAULT_STRONG_PQC_DIRECT_SIGNALS)
+    near = rules.get("near", DEFAULT_STRONG_PQC_NEAR_RULES)
+    return direct, near
+
+
 def find_target_library_signals(path, content, config=None):
     """Return target legacy library signal matches for one fetched file."""
     language = detect_language(path, content)
@@ -174,6 +301,60 @@ def find_target_library_signals(path, content, config=None):
                 "matched_text": signal,
                 "language": language,
                 "source": "content",
+            }
+        )
+    return matches
+
+
+def find_strong_pqc_signals(content, config=None):
+    """Return strong PQC API/provider signal matches from file content."""
+    content = strip_code_comments(content)
+    direct_rules, near_rules = _strong_pqc_rules(config)
+    matches = []
+    seen = set()
+
+    for signal, signal_type in direct_rules.items():
+        index = _find_signal_index(content, signal)
+        if index < 0:
+            continue
+        key = (signal.lower(), signal_type, None)
+        seen.add(key)
+        matches.append(
+            {
+                "signal": signal,
+                "matched_text": signal,
+                "signal_type": signal_type,
+                "near": None,
+                "context": _signal_context(content, index),
+            }
+        )
+
+    for rule in near_rules:
+        signal = rule["signal"]
+        signal_index = _find_signal_index(content, signal)
+        if signal_index < 0:
+            continue
+        context = _signal_context(content, signal_index)
+        near_matches = [
+            near_signal
+            for near_signal in rule.get("near", [])
+            if _contains_signal(context, near_signal)
+        ]
+        if not near_matches:
+            continue
+        near_signal = sorted(near_matches, key=len, reverse=True)[0]
+        signal_type = rule.get("signal_type", "pqc_api")
+        key = (signal.lower(), signal_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        matches.append(
+            {
+                "signal": signal,
+                "matched_text": signal,
+                "signal_type": signal_type,
+                "near": near_signal,
+                "context": context,
             }
         )
     return matches
