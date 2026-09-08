@@ -1052,14 +1052,87 @@ def _sample_source_kind(sample):
     return sample.get("quality", {}).get("source_kind") or "unknown"
 
 
-def _review_sample_checks(export_samples, non_export_samples):
+def _f2_rows_for_labels(conn, batch_id, labels):
+    labels = tuple(labels)
+    if not labels:
+        return []
+    placeholders = ", ".join("?" for _ in labels)
+    return conn.execute(
+        f"""
+        SELECT *
+        FROM f2_results
+        WHERE batch_id = ? AND final_label IN ({placeholders})
+        ORDER BY final_label, repository_full_name, matched_changed_path, commit_sha
+        """,
+        (batch_id, *labels),
+    ).fetchall()
+
+
+def _candidate_keys(rows):
+    return [row["candidate_evidence_key"] for row in rows]
+
+
+def _rows_without_review_evidence(rows):
+    return [
+        row
+        for row in rows
+        if not _json_list_field(dict(row), "review_evidence")
+    ]
+
+
+def _rows_with_drop_source_kind(rows):
+    return [
+        row
+        for row in rows
+        if _json_dict_field(dict(row), "quality").get("source_kind") in REVIEW_DROP_SOURCE_KINDS
+    ]
+
+
+def _rows_without_patch_path(rows):
+    return [row for row in rows if not row["patch_path"]]
+
+
+def _rows_without_d0_pass(conn, batch_id, export_labels):
+    export_labels = tuple(export_labels)
+    if not export_labels:
+        return []
+    placeholders = ", ".join("?" for _ in export_labels)
+    return conn.execute(
+        f"""
+        SELECT f2.candidate_evidence_key
+        FROM f2_results AS f2
+        LEFT JOIN d0_results AS d0
+            ON d0.batch_id = f2.batch_id
+            AND d0.search_item_key = f2.search_item_key
+            AND d0.commit_sha = f2.commit_sha
+            AND d0.passed = 1
+        WHERE f2.batch_id = ?
+            AND f2.final_label IN ({placeholders})
+            AND d0.search_item_key IS NULL
+        ORDER BY f2.repository_full_name, f2.matched_changed_path, f2.commit_sha
+        """,
+        (batch_id, *export_labels),
+    ).fetchall()
+
+
+def _review_sample_checks(conn, batch_id, export_labels, export_samples, non_export_samples):
+    export_rows = _f2_rows_for_labels(conn, batch_id, export_labels)
     return {
         "export_sample_count": len(export_samples),
         "non_export_sample_count": len(non_export_samples),
+        "export_candidate_count_checked": len(export_rows),
+        "export_candidates_without_review_evidence": _candidate_keys(
+            _rows_without_review_evidence(export_rows)
+        ),
+        "export_candidates_with_drop_source_kind": _candidate_keys(
+            _rows_with_drop_source_kind(export_rows)
+        ),
+        "export_candidates_without_patch_path": _candidate_keys(_rows_without_patch_path(export_rows)),
+        "export_candidates_without_d0_pass": _candidate_keys(
+            _rows_without_d0_pass(conn, batch_id, export_labels)
+        ),
         "export_samples_without_review_evidence": [
-            sample["candidate_evidence_key"]
-            for sample in export_samples
-            if not sample.get("review_evidence")
+            sample["candidate_evidence_key"] for sample in export_samples if not sample.get("review_evidence")
         ],
         "export_samples_with_drop_source_kind": [
             sample["candidate_evidence_key"]
@@ -1097,7 +1170,13 @@ def select_review_samples(conn, batch_id, limit_per_label=3, export_labels=None)
         "non_export_candidate_count": sum(label_counts.values()) - export_candidate_count,
         "export_candidate_samples": export_samples,
         "non_export_candidate_samples": non_export_samples,
-        "checks": _review_sample_checks(export_samples, non_export_samples),
+        "checks": _review_sample_checks(
+            conn,
+            batch_id,
+            export_labels,
+            export_samples,
+            non_export_samples,
+        ),
     }
 
 
