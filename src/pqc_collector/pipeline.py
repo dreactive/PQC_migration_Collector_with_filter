@@ -10,13 +10,16 @@ from pqc_collector.filter import (
     run_f1,
 )
 from pqc_collector.reports import (
+    summarize_d0_results,
     summarize_f0_results,
     summarize_f1_results,
+    write_d0_report,
     write_f0_report,
     write_f1_report,
 )
 from pqc_collector.storage import (
     iter_f0_passed_items,
+    iter_f1_passed_items,
     iter_files_for_f1,
     iter_raw_search_items,
     read_file_snapshot,
@@ -220,4 +223,53 @@ def run_d0_for_item(conn, batch_id, item, client, root=None, checked_at=None):
         "stored_row": stored_row,
         "raw_commit_path": str(raw_commit_path),
         "patch_path": str(patch_path) if patch_path else None,
+    }
+
+
+def run_d0_batch(conn, batch_id, client, limit=None, root=None, checked_at=None):
+    """Run D0 exact diff evidence collection for F1-passed items in one batch."""
+    queue = list(iter_f1_passed_items(conn, batch_id, limit))
+    d0_rows = []
+    outcomes = []
+    new_result_count = 0
+    updated_result_count = 0
+    no_commits_count = 0
+
+    for item in queue:
+        outcome = run_d0_for_item(
+            conn,
+            batch_id,
+            item,
+            client,
+            root=root,
+            checked_at=checked_at,
+        )
+        outcomes.append(outcome)
+        stored_row = outcome.get("stored_row")
+        if not stored_row:
+            no_commits_count += 1
+            continue
+        if stored_row["status"] == "new":
+            new_result_count += 1
+        else:
+            updated_result_count += 1
+        d0_rows.append(stored_row)
+
+    report_path = write_d0_report(d0_rows, batch_id, root=root)
+    summary = summarize_d0_results(d0_rows)
+    return {
+        "batch_id": batch_id,
+        "status": "completed",
+        "queued_item_count": len(queue),
+        "processed_item_count": len(outcomes),
+        "stored_result_count": len(d0_rows),
+        "new_result_count": new_result_count,
+        "updated_result_count": updated_result_count,
+        "no_commits_count": no_commits_count,
+        "report_paths": {
+            "filter_d0_diff_evidence": str(report_path),
+        },
+        "summary": summary,
+        "sample_row": d0_rows[0] if d0_rows else None,
+        "sample_outcome": outcomes[0] if outcomes else None,
     }
