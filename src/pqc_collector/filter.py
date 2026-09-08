@@ -186,6 +186,29 @@ DEFAULT_HYBRID_MESSAGE_TERMS = [
     "hybrid KEM",
     "hybrid signature",
 ]
+DEFAULT_MIGRATION_INTENT_TERMS = [
+    "migrate",
+    "migration",
+    "replace",
+    "switch",
+    "enable",
+    "add support",
+    "introduce",
+    "for client",
+    "for tls",
+    "for provider",
+]
+DEFAULT_CRYPTO_ROLE_TERMS = [
+    "tls",
+    "ssl",
+    "crypto",
+    "key exchange",
+    "signature",
+    "cipher",
+    "provider",
+    "group",
+    "handshake",
+]
 
 
 def _path_parts(path):
@@ -970,6 +993,152 @@ def detect_hybrid_signal(parsed_patch, message=None, config=None):
         "matched_terms": _unique_values(matched_terms),
         "review_evidence": evidence,
         "reason_codes": ["hybrid_signal_detected"] if hybrid else ["no_hybrid_signal"],
+    }
+
+
+def _migration_intent_terms(config=None):
+    if not config:
+        return DEFAULT_MIGRATION_INTENT_TERMS
+    return list(config.get("migration_intent_terms", DEFAULT_MIGRATION_INTENT_TERMS))
+
+
+def _crypto_role_terms(config=None):
+    if not config:
+        return DEFAULT_CRYPTO_ROLE_TERMS
+    return list(config.get("crypto_role_terms", DEFAULT_CRYPTO_ROLE_TERMS))
+
+
+def _text_evidence(kind, source_field, signal_type, supports, text, terms):
+    text = str(text or "").strip()
+    return [
+        {
+            "evidence_id": f"ev:{kind}:{index:03d}",
+            "supports": list(supports),
+            "kind": kind,
+            "repository_full_name": None,
+            "commit_sha": None,
+            "commit_url": None,
+            "file_path": None,
+            "patch_path": None,
+            "patch_hunk_header": None,
+            "patch_line_no": None,
+            "new_file_line": None,
+            "old_file_line": None,
+            "line_number": None,
+            "signal": term,
+            "signal_type": signal_type,
+            "near": None,
+            "source_field": source_field,
+            "raw_path": None,
+            "context": text,
+            "matched_terms": [term],
+            "snippet": text,
+        }
+        for index, term in enumerate(terms, start=1)
+    ]
+
+
+def _patch_role_evidence(patch_lines, terms):
+    matches = []
+    for line in patch_lines:
+        if line.get("kind") not in {"added", "removed"}:
+            continue
+        matched_terms = _line_match(line, terms)
+        if not matched_terms:
+            continue
+        matches.append(
+            {
+                "line_kinds": [line.get("kind")],
+                "line_numbers": [line.get("patch_line_no")],
+                "supports": ["migration_context"],
+                "kind": f"patch_{line.get('kind')}_line",
+                "signal": matched_terms[0],
+                "signal_type": "crypto_role",
+                "terms": matched_terms,
+                "source_field": "patch",
+            }
+        )
+    return build_line_evidence(patch_lines, matches)
+
+
+def _renumber_evidence(evidence):
+    return [
+        {
+            **row,
+            "evidence_id": f"ev:{index:03d}",
+        }
+        for index, row in enumerate(evidence, start=1)
+    ]
+
+
+def detect_migration_context(parsed_patch, message=None, path=None, config=None):
+    """Detect whether a diff has enough migration context for F2 classification."""
+    patch_lines = list(iter_patch_lines(parsed_patch))
+    evidence = []
+    matched_terms = []
+    reason_codes = []
+
+    legacy = detect_legacy_removed(parsed_patch, config)
+    if legacy["legacy_removed"]:
+        evidence.extend(legacy["review_evidence"])
+        matched_terms.extend(legacy["matched_terms"])
+        reason_codes.append("legacy_removed_in_diff")
+
+    hybrid = detect_hybrid_signal(parsed_patch, message, config)
+    if hybrid["hybrid_signal"]:
+        evidence.extend(hybrid["review_evidence"])
+        matched_terms.extend(hybrid["matched_terms"])
+        reason_codes.append("hybrid_signal_detected")
+
+    message_terms = [
+        term for term in _migration_intent_terms(config) if _contains_signal(message or "", term)
+    ]
+    if message_terms:
+        evidence.extend(
+            _text_evidence(
+                "commit_message",
+                "commit_message",
+                "intent",
+                ["migration_context"],
+                message,
+                message_terms,
+            )
+        )
+        matched_terms.extend(message_terms)
+        reason_codes.append("matched_intent_terms")
+
+    normalized_path = normalize_path(path)
+    path_terms = [term for term in _crypto_role_terms(config) if _contains_signal(normalized_path, term)]
+    if path_terms:
+        evidence.extend(
+            _text_evidence(
+                "changed_path",
+                "changed_path",
+                "crypto_role_path",
+                ["migration_context"],
+                normalized_path,
+                path_terms,
+            )
+        )
+        matched_terms.extend(path_terms)
+        reason_codes.append("crypto_role_path")
+
+    role_evidence = _patch_role_evidence(patch_lines, _crypto_role_terms(config))
+    if role_evidence:
+        evidence.extend(role_evidence)
+        for row in role_evidence:
+            matched_terms.extend(row.get("matched_terms", []))
+        reason_codes.append("crypto_role_term_in_diff")
+
+    migration_context = bool(evidence)
+    evidence = _renumber_evidence(evidence)
+    return {
+        "migration_context": migration_context,
+        "matched_terms": _unique_values(matched_terms),
+        "review_evidence": evidence,
+        "reason_codes": _unique_values(reason_codes)
+        if migration_context
+        else ["no_migration_context"],
     }
 
 
