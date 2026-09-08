@@ -330,6 +330,32 @@ def write_raw_patch(batch_id, response_key, patch_text, root=None):
     return output_path
 
 
+def _write_jsonl_rows(rows, output_path):
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    normalized_rows = [dict(row) for row in rows]
+    normalized_rows.sort(
+        key=lambda row: row.get("candidate_key") or row.get("candidate_evidence_key") or ""
+    )
+    with output_path.open("w", encoding="utf-8", newline="\n") as handle:
+        for row in normalized_rows:
+            handle.write(json.dumps(row, ensure_ascii=True, sort_keys=True))
+            handle.write("\n")
+    return output_path
+
+
+def write_batch_export(rows, batch_id, root=None):
+    """Write export-eligible candidate rows for one batch as JSONL."""
+    output_path = project_paths(root)["report_batches"] / str(batch_id) / "export_candidates.jsonl"
+    return _write_jsonl_rows(rows, output_path)
+
+
+def write_non_exported_candidates(rows, batch_id, root=None):
+    """Write non-exported candidate rows for one batch as JSONL."""
+    output_path = project_paths(root)["report_batches"] / str(batch_id) / "non_exported_candidates.jsonl"
+    return _write_jsonl_rows(rows, output_path)
+
+
 def upsert_query_page(
     conn,
     batch_id,
