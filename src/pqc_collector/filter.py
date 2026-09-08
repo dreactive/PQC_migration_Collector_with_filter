@@ -611,6 +611,79 @@ def extract_removed_lines(hunks):
     return [line for line in iter_patch_lines(hunks) if line.get("kind") == "removed"]
 
 
+def _match_terms(match):
+    terms = []
+    for key in ("terms", "matched_terms", "signals"):
+        value = match.get(key)
+        if isinstance(value, str):
+            terms.append(value)
+        elif value:
+            terms.extend(str(term) for term in value)
+    signal = match.get("signal")
+    if signal:
+        terms.append(str(signal))
+    return _unique_values(term for term in terms if term)
+
+
+def _match_kinds(match):
+    kinds = match.get("kinds") or match.get("line_kinds")
+    if isinstance(kinds, str):
+        return {kinds}
+    if kinds:
+        return {str(kind) for kind in kinds}
+    kind = match.get("kind")
+    if isinstance(kind, str) and kind.startswith("patch_") and kind.endswith("_line"):
+        return {kind.removeprefix("patch_").removesuffix("_line")}
+    return None
+
+
+def build_line_evidence(patch_lines, matches):
+    """Build F2 review evidence rows from parsed patch lines and term matches."""
+    evidence_rows = []
+    counter = 1
+    for line in patch_lines or []:
+        line_kind = line.get("kind")
+        line_text = line.get("content") or line.get("context") or ""
+        for match in matches or []:
+            allowed_kinds = _match_kinds(match)
+            if allowed_kinds and line_kind not in allowed_kinds:
+                continue
+            matched_terms = [
+                term for term in _match_terms(match) if _contains_signal(line_text, term)
+            ]
+            if not matched_terms:
+                continue
+
+            raw_path = match.get("raw_path") or match.get("patch_path")
+            evidence_rows.append(
+                {
+                    "evidence_id": f"ev:{counter:03d}",
+                    "supports": list(match.get("supports", [])),
+                    "kind": match.get("kind") or f"patch_{line_kind}_line",
+                    "repository_full_name": match.get("repository_full_name"),
+                    "commit_sha": match.get("commit_sha"),
+                    "commit_url": match.get("commit_url"),
+                    "file_path": match.get("file_path"),
+                    "patch_path": match.get("patch_path") or raw_path,
+                    "patch_hunk_header": line.get("hunk_header"),
+                    "patch_line_no": line.get("patch_line_no"),
+                    "new_file_line": line.get("new_file_line"),
+                    "old_file_line": line.get("old_file_line"),
+                    "line_number": line.get("patch_line_no"),
+                    "signal": match.get("signal") or matched_terms[0],
+                    "signal_type": match.get("signal_type"),
+                    "near": match.get("near"),
+                    "source_field": match.get("source_field", "patch"),
+                    "raw_path": raw_path,
+                    "context": line.get("context") or line_text,
+                    "matched_terms": matched_terms,
+                    "snippet": line.get("context") or line_text,
+                }
+            )
+            counter += 1
+    return evidence_rows
+
+
 def _changed_file_current_path(changed_file):
     if not isinstance(changed_file, dict):
         return ""
