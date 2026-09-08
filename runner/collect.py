@@ -25,7 +25,12 @@ from pqc_collector.filter import (  # noqa: E402
     iter_patch_lines,
     parse_patch,
 )
-from pqc_collector.pipeline import fetch_file_batch, run_f0_batch, run_f1_batch  # noqa: E402
+from pqc_collector.pipeline import (  # noqa: E402
+    fetch_file_batch,
+    run_d0_batch,
+    run_f0_batch,
+    run_f1_batch,
+)
 from pqc_collector.reports import (  # noqa: E402
     report_schemas,
     write_dedupe_summary_report,
@@ -302,6 +307,12 @@ def build_parser():
         help="Parse one unified diff patch file and print a compact JSON preview.",
     )
     inspect_patch.add_argument("--patch-path", required=True, type=Path)
+    run_d0 = subparsers.add_parser(
+        "run-d0",
+        help="Run D0 exact diff evidence collection for F1-passed items.",
+    )
+    run_d0.add_argument("--batch-id", required=True)
+    run_d0.add_argument("--limit", default=None, type=int)
     return parser
 
 
@@ -425,6 +436,20 @@ def main(argv=None):
             "added_lines_preview": added_lines[:5],
             "removed_lines_preview": removed_lines[:5],
         }
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "run-d0":
+        load_env_file(PROJECT_ROOT / ".env")
+        token = os.environ.get("GITHUB_TOKEN")
+        base_url = os.environ.get("GITHUB_API_BASE") or "https://api.github.com"
+        client = GitHubClient(token=token, base_url=base_url)
+        conn = connect(root=PROJECT_ROOT)
+        try:
+            init_db(conn)
+            result = run_d0_batch(conn, args.batch_id, client, args.limit, PROJECT_ROOT)
+        finally:
+            conn.close()
         print(json.dumps(result, indent=2))
         return 0
 
