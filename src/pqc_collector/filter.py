@@ -163,6 +163,15 @@ DEFAULT_STRONG_PQC_NEAR_RULES = [
         "signal_type": "provider",
     },
 ]
+DEFAULT_LEGACY_REMOVED_SIGNALS = {
+    "X25519": "legacy_removed",
+    "SecP256r1": "legacy_removed",
+    "P-256": "legacy_removed",
+    "prime256v1": "legacy_removed",
+    "ECDH": "legacy_removed",
+    "ECDSA": "legacy_removed",
+    "RSA": "legacy_removed",
+}
 
 
 def _path_parts(path):
@@ -771,6 +780,63 @@ def detect_pqc_added(parsed_patch, config=None):
         "matched_terms": _unique_values(matched_terms),
         "review_evidence": evidence,
         "reason_codes": ["pqc_added_in_diff"] if pqc_added else ["drop_no_pqc_added_in_diff"],
+    }
+
+
+def _legacy_removed_signals(config=None):
+    if not config:
+        return DEFAULT_LEGACY_REMOVED_SIGNALS
+    rules = config.get("legacy_removed_signals", config.get("legacy_signals", config))
+    if isinstance(rules, dict):
+        return rules
+    return {str(signal): "legacy_removed" for signal in rules or []}
+
+
+def _legacy_removed_matches(patch_lines, config=None):
+    matches = []
+    seen = set()
+    for line in patch_lines:
+        if line.get("kind") != "removed":
+            continue
+        line_text = line.get("content") or ""
+        for signal, signal_type in _legacy_removed_signals(config).items():
+            if not _contains_signal(line_text, signal):
+                continue
+            key = (line.get("patch_line_no"), signal)
+            if key in seen:
+                continue
+            seen.add(key)
+            matches.append(
+                {
+                    "line_kinds": ["removed"],
+                    "line_numbers": [line.get("patch_line_no")],
+                    "supports": ["legacy_removed_in_diff"],
+                    "kind": "patch_removed_line",
+                    "signal": signal,
+                    "signal_type": signal_type,
+                    "terms": [signal],
+                    "source_field": "patch",
+                }
+            )
+    return matches
+
+
+def detect_legacy_removed(parsed_patch, config=None):
+    """Detect legacy crypto removals from removed patch lines only."""
+    patch_lines = list(iter_patch_lines(parsed_patch))
+    matches = _legacy_removed_matches(patch_lines, config)
+    evidence = build_line_evidence(patch_lines, matches)
+    matched_terms = []
+    for row in evidence:
+        matched_terms.extend(row.get("matched_terms", []))
+    legacy_removed = bool(evidence)
+    return {
+        "legacy_removed": legacy_removed,
+        "matched_terms": _unique_values(matched_terms),
+        "review_evidence": evidence,
+        "reason_codes": (
+            ["legacy_removed_in_diff"] if legacy_removed else ["no_legacy_removed_in_diff"]
+        ),
     }
 
 
