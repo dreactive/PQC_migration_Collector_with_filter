@@ -238,6 +238,45 @@ def init_diff_evidence_table(conn):
     conn.commit()
 
 
+def init_f2_results_table(conn):
+    """Create the F2 migration classifier result table."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS f2_results (
+            batch_id TEXT NOT NULL,
+            search_item_key TEXT NOT NULL,
+            file_key TEXT NOT NULL,
+            diff_file_key TEXT,
+            candidate_evidence_key TEXT NOT NULL,
+            repository_id INTEGER,
+            repository_full_name TEXT NOT NULL,
+            commit_sha TEXT NOT NULL,
+            commit_url TEXT NOT NULL,
+            matched_changed_path TEXT NOT NULL,
+            final_label TEXT NOT NULL,
+            classification_json TEXT NOT NULL,
+            signals_json TEXT NOT NULL,
+            review_evidence_json TEXT NOT NULL DEFAULT '[]',
+            reason_codes_json TEXT NOT NULL,
+            raw_commit_path TEXT,
+            patch_path TEXT,
+            checked_at TEXT NOT NULL,
+            PRIMARY KEY (batch_id, search_item_key, commit_sha),
+            FOREIGN KEY (batch_id, search_item_key, commit_sha)
+                REFERENCES d0_results (batch_id, search_item_key, commit_sha),
+            FOREIGN KEY (file_key) REFERENCES file_snapshots (file_key)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_f2_results_batch_label
+        ON f2_results (batch_id, final_label)
+        """
+    )
+    conn.commit()
+
+
 def init_db(conn):
     """Create the collector storage schema without deleting existing data."""
     init_query_pages_table(conn)
@@ -247,6 +286,7 @@ def init_db(conn):
     init_files_table(conn)
     init_f1_results_table(conn)
     init_diff_evidence_table(conn)
+    init_f2_results_table(conn)
 
 
 def write_raw_response(batch_id, response_kind, response_key, payload, root=None):
@@ -1250,6 +1290,119 @@ def upsert_diff_evidence(conn, batch_id, row):
             int(values["patch_available"]),
             int(values["passed"]),
             json.dumps(values["changed_files"], ensure_ascii=True, sort_keys=True),
+            json.dumps(values["review_evidence"], ensure_ascii=True, sort_keys=True),
+            json.dumps(values["reason_codes"], ensure_ascii=True, sort_keys=True),
+            values["raw_commit_path"],
+            values["patch_path"],
+            values["checked_at"],
+        ),
+    )
+    conn.commit()
+
+    values["status"] = status
+    return values
+
+
+def _f2_candidate_evidence_key(batch_id, row):
+    existing = row.get("candidate_evidence_key")
+    if existing:
+        return existing
+    key_parts = [
+        str(batch_id),
+        str(row.get("search_item_key") or ""),
+        str(row.get("commit_sha") or ""),
+        str(row.get("diff_file_key") or ""),
+    ]
+    digest = hashlib.sha256("\n".join(key_parts).encode("utf-8")).hexdigest()[:24]
+    return f"f2:{digest}"
+
+
+def upsert_f2_result(conn, batch_id, row):
+    """Insert or update one F2 migration classifier result row."""
+    existing = conn.execute(
+        """
+        SELECT 1 FROM f2_results
+        WHERE batch_id = ? AND search_item_key = ? AND commit_sha = ?
+        """,
+        (batch_id, row["search_item_key"], row["commit_sha"]),
+    ).fetchone()
+    status = "updated" if existing else "new"
+    values = {
+        "batch_id": batch_id,
+        "search_item_key": row["search_item_key"],
+        "file_key": row["file_key"],
+        "diff_file_key": row.get("diff_file_key"),
+        "candidate_evidence_key": _f2_candidate_evidence_key(batch_id, row),
+        "repository_id": row.get("repository_id"),
+        "repository_full_name": row["repository_full_name"],
+        "commit_sha": row["commit_sha"],
+        "commit_url": row["commit_url"],
+        "matched_changed_path": normalize_path(row["matched_changed_path"]),
+        "final_label": row["final_label"],
+        "classification": dict(row.get("classification", {})),
+        "signals": dict(row.get("signals", {})),
+        "review_evidence": list(row.get("review_evidence", [])),
+        "reason_codes": list(row.get("reason_codes", [])),
+        "raw_commit_path": row.get("raw_commit_path"),
+        "patch_path": row.get("patch_path"),
+        "checked_at": row.get("checked_at")
+        or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+    conn.execute(
+        """
+        INSERT INTO f2_results (
+            batch_id,
+            search_item_key,
+            file_key,
+            diff_file_key,
+            candidate_evidence_key,
+            repository_id,
+            repository_full_name,
+            commit_sha,
+            commit_url,
+            matched_changed_path,
+            final_label,
+            classification_json,
+            signals_json,
+            review_evidence_json,
+            reason_codes_json,
+            raw_commit_path,
+            patch_path,
+            checked_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(batch_id, search_item_key, commit_sha) DO UPDATE SET
+            file_key = excluded.file_key,
+            diff_file_key = excluded.diff_file_key,
+            candidate_evidence_key = excluded.candidate_evidence_key,
+            repository_id = excluded.repository_id,
+            repository_full_name = excluded.repository_full_name,
+            commit_url = excluded.commit_url,
+            matched_changed_path = excluded.matched_changed_path,
+            final_label = excluded.final_label,
+            classification_json = excluded.classification_json,
+            signals_json = excluded.signals_json,
+            review_evidence_json = excluded.review_evidence_json,
+            reason_codes_json = excluded.reason_codes_json,
+            raw_commit_path = excluded.raw_commit_path,
+            patch_path = excluded.patch_path,
+            checked_at = excluded.checked_at
+        """,
+        (
+            values["batch_id"],
+            values["search_item_key"],
+            values["file_key"],
+            values["diff_file_key"],
+            values["candidate_evidence_key"],
+            values["repository_id"],
+            values["repository_full_name"],
+            values["commit_sha"],
+            values["commit_url"],
+            values["matched_changed_path"],
+            values["final_label"],
+            json.dumps(values["classification"], ensure_ascii=True, sort_keys=True),
+            json.dumps(values["signals"], ensure_ascii=True, sort_keys=True),
             json.dumps(values["review_evidence"], ensure_ascii=True, sort_keys=True),
             json.dumps(values["reason_codes"], ensure_ascii=True, sort_keys=True),
             values["raw_commit_path"],
