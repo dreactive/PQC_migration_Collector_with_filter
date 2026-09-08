@@ -24,6 +24,18 @@ FILTER_REPORT_FILES = {
     "filter_summary_md": "filter_summary.md",
 }
 
+DEFAULT_EXPORT_LABELS = ("hybrid_migration", "partial_migration", "full_migration")
+REVIEW_DROP_SOURCE_KINDS = {
+    "docs",
+    "dependency",
+    "vendor_or_generated",
+    "test",
+    "example",
+    "fuzz_or_benchmark",
+    "tooling_metadata",
+    "unknown",
+}
+
 EXPORT_REPORT_FILES = {
     "export_candidates": "export_candidates.jsonl",
     "non_exported_candidates": "non_exported_candidates.jsonl",
@@ -993,6 +1005,100 @@ def write_filter_summary_md(summary, batch_id, output_path=None, root=None):
         lines.append("")
     report_path.write_text("\n".join(lines), encoding="utf-8")
     return report_path
+
+
+def _f2_rows_for_label(conn, batch_id, label, limit):
+    return conn.execute(
+        """
+        SELECT *
+        FROM f2_results
+        WHERE batch_id = ? AND final_label = ?
+        ORDER BY repository_full_name, matched_changed_path, commit_sha
+        LIMIT ?
+        """,
+        (batch_id, label, int(limit)),
+    ).fetchall()
+
+
+def _f2_label_counts(conn, batch_id):
+    rows = conn.execute(
+        """
+        SELECT final_label, COUNT(*) AS count
+        FROM f2_results
+        WHERE batch_id = ?
+        GROUP BY final_label
+        ORDER BY final_label
+        """,
+        (batch_id,),
+    ).fetchall()
+    return {row["final_label"]: int(row["count"]) for row in rows}
+
+
+def _sample_rows_for_labels(conn, batch_id, labels, limit_per_label):
+    samples = []
+    for label in labels:
+        samples.extend(
+            normalize_f2_report_row(batch_id, row)
+            for row in _f2_rows_for_label(conn, batch_id, label, limit_per_label)
+        )
+    return samples
+
+
+def _non_export_labels(label_counts, export_labels):
+    return [label for label in sorted(label_counts) if label not in set(export_labels)]
+
+
+def _sample_source_kind(sample):
+    return sample.get("quality", {}).get("source_kind") or "unknown"
+
+
+def _review_sample_checks(export_samples, non_export_samples):
+    return {
+        "export_sample_count": len(export_samples),
+        "non_export_sample_count": len(non_export_samples),
+        "export_samples_without_review_evidence": [
+            sample["candidate_evidence_key"]
+            for sample in export_samples
+            if not sample.get("review_evidence")
+        ],
+        "export_samples_with_drop_source_kind": [
+            sample["candidate_evidence_key"]
+            for sample in export_samples
+            if _sample_source_kind(sample) in REVIEW_DROP_SOURCE_KINDS
+        ],
+        "export_samples_without_patch_path": [
+            sample["candidate_evidence_key"]
+            for sample in export_samples
+            if not sample.get("source", {}).get("patch_path")
+        ],
+    }
+
+
+def select_review_samples(conn, batch_id, limit_per_label=3, export_labels=None):
+    """Return F2 report review samples before export is built."""
+    export_labels = tuple(export_labels or DEFAULT_EXPORT_LABELS)
+    label_counts = _f2_label_counts(conn, batch_id)
+    non_export_labels = _non_export_labels(label_counts, export_labels)
+    export_samples = _sample_rows_for_labels(conn, batch_id, export_labels, limit_per_label)
+    non_export_samples = _sample_rows_for_labels(
+        conn,
+        batch_id,
+        non_export_labels,
+        limit_per_label,
+    )
+    export_candidate_count = sum(label_counts.get(label, 0) for label in export_labels)
+    return {
+        "batch_id": batch_id,
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "export_labels": list(export_labels),
+        "non_export_labels": non_export_labels,
+        "label_counts": label_counts,
+        "export_candidate_count": export_candidate_count,
+        "non_export_candidate_count": sum(label_counts.values()) - export_candidate_count,
+        "export_candidate_samples": export_samples,
+        "non_export_candidate_samples": non_export_samples,
+        "checks": _review_sample_checks(export_samples, non_export_samples),
+    }
 
 
 def write_dedupe_summary_report(
