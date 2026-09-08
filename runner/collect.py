@@ -35,6 +35,7 @@ from pqc_collector.pipeline import (  # noqa: E402
 )
 from pqc_collector.reports import (  # noqa: E402
     build_filter_review_status,
+    inspect_export_file,
     report_schemas,
     select_review_samples,
     summarize_filter_results,
@@ -375,6 +376,23 @@ def build_parser():
         action="store_true",
         help="Also export pqc_addition_only candidates. Omit for default export labels.",
     )
+    inspect_export = subparsers.add_parser(
+        "inspect-export",
+        help="Inspect export JSONL schema, evidence fields, and raw paths.",
+    )
+    inspect_export.add_argument("--source", required=True, type=Path)
+    inspect_export.add_argument(
+        "--schema-name",
+        default="export_candidates",
+        choices=("export_candidates", "cumulative_export", "non_exported_candidates"),
+    )
+    inspect_export.add_argument(
+        "--root",
+        default=PROJECT_ROOT,
+        type=Path,
+        help="Project root used to resolve relative raw evidence paths.",
+    )
+    inspect_export.add_argument("--sample-limit", default=3, type=int)
     return parser
 
 
@@ -611,6 +629,16 @@ def main(argv=None):
                 result["requested_batch_id"] = args.batch_id
         finally:
             conn.close()
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "inspect-export":
+        result = inspect_export_file(
+            args.source,
+            root=args.root,
+            schema_name=args.schema_name,
+            sample_limit=args.sample_limit,
+        )
         print(json.dumps(result, indent=2))
         return 0
 

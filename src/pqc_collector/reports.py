@@ -1248,6 +1248,157 @@ def build_filter_review_status(summary, review_samples):
     }
 
 
+def _read_jsonl_file(path):
+    rows = []
+    invalid_lines = []
+    with Path(path).open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                rows.append(json.loads(text))
+            except json.JSONDecodeError as exc:
+                invalid_lines.append({"line_number": line_number, "error": str(exc)})
+    return rows, invalid_lines
+
+
+def _resolve_report_path(path, root=None):
+    source_path = Path(path)
+    if source_path.is_absolute():
+        return source_path
+    return project_paths(root)["root"] / source_path
+
+
+def _row_identity(row, index):
+    return row.get("candidate_key") or row.get("candidate_evidence_key") or f"row:{index}"
+
+
+def _missing_required_fields(row, required_fields):
+    return [field for field in required_fields if field not in row]
+
+
+def _raw_paths_from_export_row(row):
+    source = row.get("source") if isinstance(row.get("source"), dict) else {}
+    paths = [source.get("raw_commit_path"), source.get("patch_path")]
+    for evidence in row.get("review_evidence") or []:
+        if not isinstance(evidence, dict):
+            continue
+        paths.extend([evidence.get("raw_path"), evidence.get("patch_path")])
+    return [path for path in dict.fromkeys(paths) if path]
+
+
+def _missing_raw_paths(row, root=None):
+    base = project_paths(root)["root"]
+    missing = []
+    for raw_path in _raw_paths_from_export_row(row):
+        path = Path(raw_path)
+        resolved = path if path.is_absolute() else base / path
+        if not resolved.exists():
+            missing.append(raw_path)
+    return missing
+
+
+def _missing_evidence_fields(evidence):
+    required = ("line_number", "context", "signal", "signal_type", "source_field", "raw_path")
+    missing = [field for field in required if field not in evidence]
+    source_field = evidence.get("source_field")
+    kind = evidence.get("kind")
+    if source_field == "patch" or str(kind or "").startswith("patch_"):
+        patch_fields = ("patch_hunk_header", "patch_line_no")
+        missing.extend(field for field in patch_fields if field not in evidence)
+        if kind == "patch_added_line" and "new_file_line" not in evidence:
+            missing.append("new_file_line")
+        if kind == "patch_removed_line" and "old_file_line" not in evidence:
+            missing.append("old_file_line")
+    return missing
+
+
+def inspect_export_file(source, root=None, schema_name="export_candidates", sample_limit=3):
+    """Inspect export JSONL rows for schema and evidence traceability."""
+    source_path = _resolve_report_path(source, root)
+    if not source_path.exists():
+        return {
+            "source_path": str(source_path),
+            "status": "source_not_found",
+            "row_count": 0,
+            "is_traceable": False,
+        }
+
+    rows, invalid_lines = _read_jsonl_file(source_path)
+    required_fields = report_schemas().get(schema_name, {}).get("required_fields", [])
+    missing_required = []
+    rows_without_review_evidence = []
+    rows_with_untraceable_evidence = []
+    rows_with_missing_raw_paths = []
+    evidence_count = 0
+    raw_path_count = 0
+
+    for index, row in enumerate(rows, start=1):
+        row_id = _row_identity(row, index)
+        missing = _missing_required_fields(row, required_fields)
+        if missing:
+            missing_required.append({"row": row_id, "missing_fields": missing})
+
+        review_evidence = row.get("review_evidence") or []
+        if not review_evidence:
+            rows_without_review_evidence.append(row_id)
+        evidence_count += len(review_evidence)
+
+        bad_evidence = []
+        for evidence_index, evidence in enumerate(review_evidence, start=1):
+            if not isinstance(evidence, dict):
+                bad_evidence.append({"evidence_index": evidence_index, "missing_fields": ["object"]})
+                continue
+            evidence_missing = _missing_evidence_fields(evidence)
+            if evidence_missing:
+                bad_evidence.append(
+                    {
+                        "evidence_index": evidence_index,
+                        "evidence_id": evidence.get("evidence_id"),
+                        "missing_fields": evidence_missing,
+                    }
+                )
+        if bad_evidence:
+            rows_with_untraceable_evidence.append({"row": row_id, "evidence": bad_evidence})
+
+        raw_paths = _raw_paths_from_export_row(row)
+        raw_path_count += len(raw_paths)
+        missing_paths = _missing_raw_paths(row, root)
+        if missing_paths:
+            rows_with_missing_raw_paths.append({"row": row_id, "missing_raw_paths": missing_paths})
+
+    is_traceable = not any(
+        (
+            invalid_lines,
+            missing_required,
+            rows_without_review_evidence,
+            rows_with_untraceable_evidence,
+            rows_with_missing_raw_paths,
+        )
+    )
+    return {
+        "source_path": str(source_path),
+        "schema_name": schema_name,
+        "status": "traceable" if is_traceable else "needs_review",
+        "is_traceable": is_traceable,
+        "row_count": len(rows),
+        "invalid_json_line_count": len(invalid_lines),
+        "rows_missing_required_fields_count": len(missing_required),
+        "rows_without_review_evidence_count": len(rows_without_review_evidence),
+        "rows_with_untraceable_evidence_count": len(rows_with_untraceable_evidence),
+        "rows_with_missing_raw_paths_count": len(rows_with_missing_raw_paths),
+        "review_evidence_count": evidence_count,
+        "raw_path_count": raw_path_count,
+        "invalid_json_lines": invalid_lines[:sample_limit],
+        "rows_missing_required_fields": missing_required[:sample_limit],
+        "rows_without_review_evidence": rows_without_review_evidence[:sample_limit],
+        "rows_with_untraceable_evidence": rows_with_untraceable_evidence[:sample_limit],
+        "rows_with_missing_raw_paths": rows_with_missing_raw_paths[:sample_limit],
+        "sample_rows": rows[:sample_limit],
+    }
+
+
 def write_dedupe_summary_report(
     conn,
     batch_id,
