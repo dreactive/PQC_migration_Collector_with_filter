@@ -7,7 +7,7 @@ will be added here one minimum feature at a time.
 import re
 from datetime import datetime, timezone
 
-from pqc_collector.core import normalize_path
+from pqc_collector.core import diff_file_key, normalize_path
 
 
 DROP_SOURCE_KINDS = {
@@ -650,6 +650,150 @@ def find_exact_changed_file(search_path, changed_files):
             "contents_url": changed_file.get("contents_url"),
         }
     return None
+
+
+def _commit_payload(commit_or_pr_payload):
+    if isinstance(commit_or_pr_payload, dict) and "payload" in commit_or_pr_payload:
+        return commit_or_pr_payload["payload"]
+    return commit_or_pr_payload or {}
+
+
+def _commit_sha(payload):
+    return payload.get("sha") or payload.get("commit_sha") or payload.get("head", {}).get("sha")
+
+
+def _commit_url(payload, repository_full_name=None, commit_sha=None):
+    return (
+        payload.get("html_url")
+        or payload.get("commit_url")
+        or (
+            f"https://github.com/{repository_full_name}/commit/{commit_sha}"
+            if repository_full_name and commit_sha
+            else None
+        )
+    )
+
+
+def _changed_file_paths(changed_files):
+    return [
+        normalize_path(_changed_file_current_path(changed_file))
+        for changed_file in changed_files or []
+        if _changed_file_current_path(changed_file)
+    ]
+
+
+def _exact_path_evidence(item, matched_file, raw_commit_path):
+    search_path = item.get("normalized_path") or item.get("search_item_path") or item.get("path")
+    matched_path = matched_file["normalized_changed_path"]
+    return {
+        "supports": ["exact_changed_file_found"],
+        "signal": matched_path,
+        "signal_type": "exact_path",
+        "line_number": None,
+        "context": "changed_files.path exactly matched search item normalized_path",
+        "source_field": "changed_files.path",
+        "raw_path": raw_commit_path,
+        "patch_hunk_header": None,
+        "patch_line_no": None,
+        "new_file_line": None,
+        "old_file_line": None,
+        "search_item_path": normalize_path(search_path),
+        "changed_path": matched_path,
+    }
+
+
+def _patch_available_evidence(matched_file, patch_path):
+    first_line = next(iter_patch_lines(parse_patch(matched_file.get("patch"))), None)
+    return {
+        "supports": ["patch_available"],
+        "signal": "patch",
+        "signal_type": "patch_hunk",
+        "line_number": first_line.get("patch_line_no") if first_line else None,
+        "context": first_line.get("context") if first_line else "patch is present",
+        "source_field": "patch",
+        "raw_path": patch_path,
+        "patch_hunk_header": first_line.get("hunk_header") if first_line else None,
+        "patch_line_no": first_line.get("patch_line_no") if first_line else None,
+        "new_file_line": first_line.get("new_file_line") if first_line else None,
+        "old_file_line": first_line.get("old_file_line") if first_line else None,
+    }
+
+
+def _missing_exact_path_evidence(search_path, changed_files, raw_commit_path):
+    changed_paths = _changed_file_paths(changed_files)
+    return {
+        "supports": ["drop_no_exact_changed_file"],
+        "signal": normalize_path(search_path),
+        "signal_type": "exact_path",
+        "line_number": None,
+        "context": (
+            "no changed_files.path exactly matched search item path; "
+            f"changed_paths={changed_paths[:10]}"
+        ),
+        "source_field": "changed_files.path",
+        "raw_path": raw_commit_path,
+        "patch_hunk_header": None,
+        "patch_line_no": None,
+        "new_file_line": None,
+        "old_file_line": None,
+    }
+
+
+def run_d0_for_item(item, commit_or_pr_payload, raw_commit_path=None, patch_path=None, checked_at=None):
+    """Build one D0 exact diff evidence result row for one commit payload."""
+    payload = _commit_payload(commit_or_pr_payload)
+    changed_files = payload.get("files") or payload.get("changed_files") or []
+    search_path = item.get("normalized_path") or item.get("search_item_path") or item.get("path")
+    matched_file = find_exact_changed_file(search_path, changed_files)
+    repository_id = item.get("repository_id")
+    repository_full_name = item.get("repository_full_name")
+    commit_sha = _commit_sha(payload)
+    commit_url = _commit_url(payload, repository_full_name, commit_sha)
+    reason_codes = []
+    review_evidence = []
+
+    if matched_file:
+        reason_codes.append("exact_changed_file_found")
+        review_evidence.append(_exact_path_evidence(item, matched_file, raw_commit_path))
+    else:
+        reason_codes.append("drop_no_exact_changed_file")
+        review_evidence.append(_missing_exact_path_evidence(search_path, changed_files, raw_commit_path))
+
+    patch_available = bool(matched_file and matched_file.get("patch_available"))
+    if patch_available:
+        reason_codes.append("patch_available")
+        review_evidence.append(_patch_available_evidence(matched_file, patch_path))
+    else:
+        reason_codes.append("drop_no_patch")
+
+    passed = bool(matched_file) and patch_available
+    reason_codes.append("d0_pass" if passed else "d0_drop")
+    matched_path = matched_file["normalized_changed_path"] if matched_file else None
+    return {
+        "batch_id": item.get("batch_id"),
+        "search_item_key": item["search_item_key"],
+        "file_key": item["file_key"],
+        "repository_id": repository_id,
+        "diff_file_key": (
+            diff_file_key(repository_id, commit_sha, matched_path)
+            if repository_id is not None and commit_sha and matched_path
+            else None
+        ),
+        "repository_full_name": repository_full_name,
+        "search_item_path": normalize_path(search_path),
+        "commit_sha": commit_sha,
+        "commit_url": commit_url,
+        "matched_changed_path": matched_path,
+        "exact_path_match": bool(matched_file),
+        "patch_available": patch_available,
+        "passed": passed,
+        "changed_files": _changed_file_paths(changed_files),
+        "review_evidence": review_evidence,
+        "reason_codes": reason_codes,
+        "raw_commit_path": raw_commit_path,
+        "patch_path": patch_path if patch_available else None,
+        "checked_at": checked_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
 
 
 def is_documentation_path(path):
