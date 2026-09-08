@@ -31,6 +31,7 @@ from pqc_collector.pipeline import (  # noqa: E402
     run_d0_batch,
     run_f0_batch,
     run_f1_batch,
+    run_f2_batch,
 )
 from pqc_collector.reports import (  # noqa: E402
     build_filter_review_status,
@@ -222,6 +223,23 @@ def resolve_report_batch_id(conn, batch_id):
     return row["batch_id"] if row else None
 
 
+def resolve_d0_passed_batch_id(conn, batch_id):
+    """Resolve latest to the newest batch with D0-passed rows for F2 input."""
+    if batch_id != "latest":
+        return batch_id
+    row = conn.execute(
+        """
+        SELECT batch_id
+        FROM d0_results
+        WHERE passed = 1
+        GROUP BY batch_id
+        ORDER BY MAX(checked_at) DESC, batch_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return row["batch_id"] if row else None
+
+
 def check_rate_limit(batch_id):
     """Call GitHub /rate_limit once, store raw response, and return a summary."""
     loaded_env_keys = load_env_file(PROJECT_ROOT / ".env")
@@ -335,6 +353,12 @@ def build_parser():
     )
     run_d0.add_argument("--batch-id", required=True)
     run_d0.add_argument("--limit", default=None, type=int)
+    run_f2 = subparsers.add_parser(
+        "run-f2",
+        help="Run F2 migration classification for D0-passed diff rows.",
+    )
+    run_f2.add_argument("--batch-id", required=True)
+    run_f2.add_argument("--limit", default=None, type=int)
     report_filters = subparsers.add_parser(
         "report-filters",
         help="Write filter summaries and print review samples for one batch.",
@@ -486,6 +510,32 @@ def main(argv=None):
         try:
             init_db(conn)
             result = run_d0_batch(conn, args.batch_id, client, args.limit, PROJECT_ROOT)
+        finally:
+            conn.close()
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "run-f2":
+        conn = connect(root=PROJECT_ROOT)
+        try:
+            init_db(conn)
+            batch_id = resolve_d0_passed_batch_id(conn, args.batch_id)
+            if batch_id is None:
+                result = {
+                    "requested_batch_id": args.batch_id,
+                    "batch_id": None,
+                    "status": "no_d0_passed_results",
+                    "queued_item_count": 0,
+                    "processed_item_count": 0,
+                    "new_result_count": 0,
+                    "updated_result_count": 0,
+                    "report_paths": {},
+                    "summary": {},
+                    "sample_row": None,
+                }
+            else:
+                result = run_f2_batch(conn, batch_id, args.limit, PROJECT_ROOT)
+                result["requested_batch_id"] = args.batch_id
         finally:
             conn.close()
         print(json.dumps(result, indent=2))
