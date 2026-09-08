@@ -3,7 +3,12 @@
 import hashlib
 
 from pqc_collector.core import file_key
-from pqc_collector.filter import run_f0_for_item, run_f1
+from pqc_collector.filter import (
+    find_exact_changed_file,
+    run_d0_for_item as build_d0_row,
+    run_f0_for_item,
+    run_f1,
+)
 from pqc_collector.reports import (
     summarize_f0_results,
     summarize_f1_results,
@@ -15,9 +20,11 @@ from pqc_collector.storage import (
     iter_files_for_f1,
     iter_raw_search_items,
     read_file_snapshot,
+    upsert_diff_evidence,
     upsert_f0_result,
     upsert_f1_result,
     upsert_file_snapshot,
+    write_raw_patch,
     write_raw_response,
 )
 
@@ -145,4 +152,72 @@ def run_f1_batch(conn, batch_id, limit=None, root=None, configs=None, checked_at
         },
         "summary": summary,
         "sample_row": f1_rows[0] if f1_rows else None,
+    }
+
+
+def run_d0_for_item(conn, batch_id, item, client, root=None, checked_at=None):
+    """Fetch and store D0 exact diff evidence for one F1-passed item."""
+    commits_response = client.list_commits_for_path(
+        item["repository_full_name"],
+        item["normalized_path"],
+        page=1,
+        per_page=1,
+    )
+    commits = commits_response.get("payload", [])
+    if not commits:
+        return {
+            "batch_id": batch_id,
+            "search_item_key": item["search_item_key"],
+            "status": "no_commits_found",
+            "commit_count": 0,
+            "stored_row": None,
+            "raw_commit_path": None,
+            "patch_path": None,
+        }
+
+    commit_sha = commits[0]["sha"]
+    commit_response = client.get_commit(item["repository_full_name"], commit_sha)
+    raw_commit_path = write_raw_response(
+        batch_id,
+        "commit",
+        commit_sha,
+        commit_response,
+        root,
+    )
+    payload = commit_response.get("payload", {})
+    matched_file = find_exact_changed_file(
+        item["normalized_path"],
+        payload.get("files", []),
+    )
+    patch_path = None
+    if matched_file and matched_file.get("patch_available"):
+        preview_row = build_d0_row(
+            item,
+            commit_response,
+            raw_commit_path=str(raw_commit_path),
+            checked_at=checked_at,
+        )
+        patch_path = write_raw_patch(
+            batch_id,
+            preview_row["diff_file_key"],
+            matched_file["patch"],
+            root,
+        )
+
+    d0_row = build_d0_row(
+        item,
+        commit_response,
+        raw_commit_path=str(raw_commit_path),
+        patch_path=str(patch_path) if patch_path else None,
+        checked_at=checked_at,
+    )
+    stored_row = upsert_diff_evidence(conn, batch_id, d0_row)
+    return {
+        "batch_id": batch_id,
+        "search_item_key": item["search_item_key"],
+        "status": stored_row["status"],
+        "commit_count": len(commits),
+        "stored_row": stored_row,
+        "raw_commit_path": str(raw_commit_path),
+        "patch_path": str(patch_path) if patch_path else None,
     }
