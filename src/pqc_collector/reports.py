@@ -41,6 +41,17 @@ EXPORT_REPORT_FILES = {
     "non_exported_candidates": "non_exported_candidates.jsonl",
 }
 
+VIEWER_SECTIONS = (
+    ("hybrid_migration", "Hybrid Migration Review"),
+    ("partial_migration", "Partial Migration Review"),
+    ("full_migration", "Full Migration Review"),
+    ("pqc_addition_only", "PQC Addition Only"),
+    ("dropped", "Dropped / Non Exported"),
+)
+
+VIEWER_SECTION_TITLES = dict(VIEWER_SECTIONS)
+EXPORT_VIEWER_LABELS = {section_id for section_id, _title in VIEWER_SECTIONS[:-1]}
+
 REPORT_SCHEMAS = {
     "collection_summary": {
         "format": "md",
@@ -1396,6 +1407,937 @@ def inspect_export_file(source, root=None, schema_name="export_candidates", samp
         "rows_with_untraceable_evidence": rows_with_untraceable_evidence[:sample_limit],
         "rows_with_missing_raw_paths": rows_with_missing_raw_paths[:sample_limit],
         "sample_rows": rows[:sample_limit],
+    }
+
+
+def _evidence_list(row):
+    review_evidence = row.get("review_evidence")
+    if isinstance(review_evidence, list):
+        return [item for item in review_evidence if isinstance(item, dict)]
+    evidence = row.get("evidence")
+    if isinstance(evidence, list):
+        return [item for item in evidence if isinstance(item, dict)]
+    return []
+
+
+def _text_blob(*values):
+    parts = []
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple, set)):
+            parts.extend(str(item) for item in value)
+        elif isinstance(value, dict):
+            parts.extend(str(item) for item in value.values())
+        else:
+            parts.append(str(value))
+    return " ".join(parts).lower()
+
+
+def _evidence_blob(evidence):
+    return _text_blob(
+        evidence.get("kind"),
+        evidence.get("signal"),
+        evidence.get("signal_type"),
+        evidence.get("near"),
+        evidence.get("source_field"),
+        evidence.get("context"),
+        evidence.get("supports"),
+        evidence.get("reason_codes"),
+    )
+
+
+def _append_once(target, evidence):
+    identity = json.dumps(evidence, sort_keys=True, ensure_ascii=True)
+    if identity not in target["_seen"]:
+        target["_seen"].add(identity)
+        target["rows"].append(evidence)
+
+
+def group_review_evidence(row):
+    """Group row-level review evidence into manual validation sections."""
+    groups = {
+        "pqc_added": {"rows": [], "_seen": set()},
+        "legacy_removed": {"rows": [], "_seen": set()},
+        "intent": {"rows": [], "_seen": set()},
+        "hybrid": {"rows": [], "_seen": set()},
+        "partial": {"rows": [], "_seen": set()},
+        "full": {"rows": [], "_seen": set()},
+        "exact_path": {"rows": [], "_seen": set()},
+        "other": {"rows": [], "_seen": set()},
+        "all": {"rows": [], "_seen": set()},
+    }
+
+    for evidence in _evidence_list(row):
+        blob = _evidence_blob(evidence)
+        matched = False
+        _append_once(groups["all"], evidence)
+
+        if (
+            evidence.get("kind") == "patch_added_line"
+            or "pqc_added" in blob
+            or evidence.get("signal_type") in {"pqc_api", "pqc_provider", "pqc_group"}
+        ):
+            _append_once(groups["pqc_added"], evidence)
+            matched = True
+        if (
+            evidence.get("kind") == "patch_removed_line"
+            or "legacy_removed" in blob
+            or "removed_legacy" in blob
+            or evidence.get("signal_type") == "legacy_removed"
+        ):
+            _append_once(groups["legacy_removed"], evidence)
+            matched = True
+        if (
+            evidence.get("source_field") == "commit_message"
+            or evidence.get("signal_type") == "intent"
+            or "intent" in blob
+            or "migration_intent" in blob
+        ):
+            _append_once(groups["intent"], evidence)
+            matched = True
+        if "hybrid" in blob:
+            _append_once(groups["hybrid"], evidence)
+            matched = True
+        if "partial" in blob:
+            _append_once(groups["partial"], evidence)
+            matched = True
+        if "full" in blob or "complete_migration" in blob:
+            _append_once(groups["full"], evidence)
+            matched = True
+        if evidence.get("signal_type") == "exact_path" or "exact_path" in blob:
+            _append_once(groups["exact_path"], evidence)
+            matched = True
+        if not matched:
+            _append_once(groups["other"], evidence)
+
+    return {name: value["rows"] for name, value in groups.items()}
+
+
+def _source_dict(row):
+    return row.get("source") if isinstance(row.get("source"), dict) else {}
+
+
+def _repository_dict(row):
+    return row.get("repository") if isinstance(row.get("repository"), dict) else {}
+
+
+def _final_label(row):
+    classification = row.get("classification") if isinstance(row.get("classification"), dict) else {}
+    return row.get("final_label") or classification.get("migration_type") or "dropped"
+
+
+def _viewer_section_id(row):
+    label = _final_label(row)
+    if label in EXPORT_VIEWER_LABELS:
+        return label
+    return "dropped"
+
+
+def group_by_migration_type(rows):
+    """Group export rows or viewer candidates by manual review section."""
+    groups = {section_id: [] for section_id, _title in VIEWER_SECTIONS}
+    for row in rows:
+        groups[_viewer_section_id(row)].append(row)
+    return groups
+
+
+def _unique_nonempty(values):
+    return [value for value in dict.fromkeys(values) if value]
+
+
+def _row_primary_path(row, source):
+    return (
+        source.get("primary_path")
+        or row.get("matched_changed_path")
+        or row.get("path")
+        or row.get("search_item_path")
+    )
+
+
+def _row_repository_name(row, repository):
+    return repository.get("full_name") or row.get("repository_full_name")
+
+
+def _candidate_review_checklist(row, evidence_groups):
+    source = _source_dict(row)
+    repository = _repository_dict(row)
+    label = _final_label(row)
+    reason_codes = row.get("reason_codes") or []
+    checklist = [
+        {
+            "id": "repository",
+            "label": "Repository",
+            "passed": bool(_row_repository_name(row, repository)),
+            "details": _row_repository_name(row, repository),
+        },
+        {
+            "id": "commit_or_pr_url",
+            "label": "Commit or PR URL",
+            "passed": bool(source.get("commit_url") or source.get("pr_url") or row.get("commit_url")),
+            "details": source.get("commit_url") or source.get("pr_url") or row.get("commit_url"),
+        },
+        {
+            "id": "changed_path",
+            "label": "Changed path",
+            "passed": bool(_row_primary_path(row, source)),
+            "details": _row_primary_path(row, source),
+        },
+        {
+            "id": "review_evidence",
+            "label": "Review evidence",
+            "passed": bool(evidence_groups.get("all")),
+            "details": f"{len(evidence_groups.get('all', []))} evidence rows",
+        },
+    ]
+    if label == "hybrid_migration":
+        checklist.extend(
+            [
+                {
+                    "id": "pqc_added_evidence",
+                    "label": "PQC added evidence",
+                    "passed": bool(evidence_groups.get("pqc_added")),
+                    "details": f"{len(evidence_groups.get('pqc_added', []))} rows",
+                },
+                {
+                    "id": "hybrid_evidence",
+                    "label": "Hybrid evidence",
+                    "passed": bool(evidence_groups.get("hybrid")),
+                    "details": f"{len(evidence_groups.get('hybrid', []))} rows",
+                },
+            ]
+        )
+    elif label == "partial_migration":
+        checklist.extend(
+            [
+                {
+                    "id": "pqc_added_evidence",
+                    "label": "PQC added evidence",
+                    "passed": bool(evidence_groups.get("pqc_added")),
+                    "details": f"{len(evidence_groups.get('pqc_added', []))} rows",
+                },
+                {
+                    "id": "partial_evidence",
+                    "label": "Partial evidence",
+                    "passed": bool(evidence_groups.get("partial") or evidence_groups.get("other")),
+                    "details": f"{len(evidence_groups.get('partial', []))} partial rows",
+                },
+            ]
+        )
+    elif label == "full_migration":
+        checklist.extend(
+            [
+                {
+                    "id": "pqc_added_evidence",
+                    "label": "PQC added evidence",
+                    "passed": bool(evidence_groups.get("pqc_added")),
+                    "details": f"{len(evidence_groups.get('pqc_added', []))} rows",
+                },
+                {
+                    "id": "legacy_removed_evidence",
+                    "label": "Legacy removed evidence",
+                    "passed": bool(evidence_groups.get("legacy_removed")),
+                    "details": f"{len(evidence_groups.get('legacy_removed', []))} rows",
+                },
+                {
+                    "id": "full_or_intent_evidence",
+                    "label": "Full or intent evidence",
+                    "passed": bool(evidence_groups.get("full") or evidence_groups.get("intent")),
+                    "details": (
+                        f"{len(evidence_groups.get('full', []))} full rows, "
+                        f"{len(evidence_groups.get('intent', []))} intent rows"
+                    ),
+                },
+            ]
+        )
+    elif label == "pqc_addition_only":
+        checklist.append(
+            {
+                "id": "pqc_added_evidence",
+                "label": "PQC added evidence",
+                "passed": bool(evidence_groups.get("pqc_added")),
+                "details": f"{len(evidence_groups.get('pqc_added', []))} rows",
+            }
+        )
+    else:
+        checklist.append(
+            {
+                "id": "drop_reason",
+                "label": "Drop reason",
+                "passed": bool(reason_codes),
+                "details": ", ".join(reason_codes),
+            }
+        )
+    return checklist
+
+
+def _raw_paths_for_viewer(row, evidence_rows):
+    source = _source_dict(row)
+    paths = [
+        source.get("raw_commit_path"),
+        source.get("patch_path"),
+        row.get("raw_commit_path"),
+        row.get("patch_path"),
+        row.get("raw_file_path"),
+    ]
+    for evidence in evidence_rows:
+        paths.extend([evidence.get("raw_path"), evidence.get("patch_path")])
+    return _unique_nonempty(paths)
+
+
+def _viewer_candidate(row, index):
+    source = _source_dict(row)
+    repository = _repository_dict(row)
+    evidence_groups = group_review_evidence(row)
+    label = _final_label(row)
+    evidence_rows = evidence_groups.get("all", [])
+    return {
+        "index": index,
+        "candidate_key": row.get("candidate_key") or row.get("candidate_evidence_key") or f"row:{index}",
+        "batch_id": row.get("batch_id"),
+        "source_batch_ids": row.get("source_batch_ids") or [],
+        "final_label": label,
+        "section_id": _viewer_section_id(row),
+        "section_title": VIEWER_SECTION_TITLES[_viewer_section_id(row)],
+        "repository": {
+            "id": repository.get("id") or row.get("repository_id"),
+            "full_name": _row_repository_name(row, repository),
+            "html_url": repository.get("html_url") or row.get("repository_url"),
+        },
+        "source": {
+            "primary_path": _row_primary_path(row, source),
+            "changed_paths": source.get("changed_paths") or row.get("changed_files") or [],
+            "commit_sha": source.get("commit_sha") or row.get("commit_sha"),
+            "commit_url": source.get("commit_url") or row.get("commit_url"),
+            "pr_number": source.get("pr_number") or row.get("pr_number"),
+            "pr_url": source.get("pr_url") or row.get("pr_url"),
+            "raw_commit_path": source.get("raw_commit_path") or row.get("raw_commit_path"),
+            "patch_path": source.get("patch_path") or row.get("patch_path"),
+        },
+        "classification": row.get("classification") or {},
+        "signals": row.get("signals") or {},
+        "quality": row.get("quality") or {},
+        "reason_codes": row.get("reason_codes") or [],
+        "migration_checklist": _candidate_review_checklist(row, evidence_groups),
+        "review_evidence": evidence_rows,
+        "evidence_groups": evidence_groups,
+        "raw_paths": _raw_paths_for_viewer(row, evidence_rows),
+    }
+
+
+def build_viewer_dataset(export_path, root=None):
+    """Build the JSON payload used by the static manual review viewer."""
+    source_path = _resolve_report_path(export_path, root)
+    if source_path.exists():
+        rows, invalid_lines = _read_jsonl_file(source_path)
+        status = "ready"
+    else:
+        rows, invalid_lines = [], []
+        status = "source_not_found"
+
+    candidates = [_viewer_candidate(row, index) for index, row in enumerate(rows, start=1)]
+    grouped = group_by_migration_type(candidates)
+    label_counts = {section_id: len(grouped.get(section_id, [])) for section_id, _title in VIEWER_SECTIONS}
+    sections = [
+        {
+            "id": section_id,
+            "title": title,
+            "count": len(grouped.get(section_id, [])),
+            "candidates": grouped.get(section_id, []),
+        }
+        for section_id, title in VIEWER_SECTIONS
+    ]
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "source_path": str(source_path),
+        "status": status,
+        "candidate_count": len(candidates),
+        "invalid_json_line_count": len(invalid_lines),
+        "invalid_json_lines": invalid_lines,
+        "label_counts": label_counts,
+        "sections": sections,
+        "candidates": candidates,
+    }
+
+
+def _viewer_index_html(embedded_json):
+    template = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PQC Migration Review</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">PQC Collector</p>
+      <h1>Manual Migration Review</h1>
+    </div>
+    <div class="summary" id="summary"></div>
+  </header>
+  <main class="layout">
+    <aside class="sidebar">
+      <div id="sectionNav" class="section-nav"></div>
+      <label class="search">
+        <span>Search</span>
+        <input id="searchInput" type="search" autocomplete="off">
+      </label>
+      <div id="candidateList" class="candidate-list"></div>
+    </aside>
+    <section id="detail" class="detail"></section>
+  </main>
+  <script id="viewer-data" type="application/json">__VIEWER_DATA__</script>
+  <script src="app.js"></script>
+</body>
+</html>
+"""
+    return template.replace("__VIEWER_DATA__", embedded_json)
+
+
+def _viewer_app_js():
+    return """const dataNode = document.getElementById("viewer-data");
+const dataset = dataNode ? JSON.parse(dataNode.textContent) : { sections: [], candidates: [] };
+const firstSection = (dataset.sections || []).find((section) => section.count > 0) || (dataset.sections || [])[0];
+let activeSectionId = firstSection ? firstSection.id : null;
+let activeCandidateKey = null;
+let query = "";
+
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  })[char]);
+}
+
+function link(url, label) {
+  if (!url) return "";
+  return `<a href="${esc(url)}" target="_blank" rel="noreferrer">${esc(label || url)}</a>`;
+}
+
+function activeSection() {
+  return (dataset.sections || []).find((section) => section.id === activeSectionId) || { candidates: [] };
+}
+
+function filteredCandidates() {
+  const text = query.trim().toLowerCase();
+  const candidates = activeSection().candidates || [];
+  if (!text) return candidates;
+  return candidates.filter((candidate) => JSON.stringify(candidate).toLowerCase().includes(text));
+}
+
+function renderSummary() {
+  const counts = dataset.label_counts || {};
+  document.getElementById("summary").innerHTML = `
+    <span>${esc(dataset.status || "ready")}</span>
+    <span>${esc(dataset.candidate_count || 0)} candidates</span>
+    <span>${esc(dataset.source_path || "")}</span>
+  `;
+  return counts;
+}
+
+function renderSections() {
+  const nav = document.getElementById("sectionNav");
+  nav.innerHTML = (dataset.sections || []).map((section) => `
+    <button class="section-button ${section.id === activeSectionId ? "active" : ""}" data-section="${esc(section.id)}">
+      <span>${esc(section.title)}</span>
+      <strong>${esc(section.count || 0)}</strong>
+    </button>
+  `).join("");
+  nav.querySelectorAll("button").forEach((button) => {
+    button.addEventListener("click", () => {
+      activeSectionId = button.dataset.section;
+      activeCandidateKey = null;
+      render();
+    });
+  });
+}
+
+function candidateTitle(candidate) {
+  const repo = candidate.repository && candidate.repository.full_name ? candidate.repository.full_name : "unknown/repo";
+  const path = candidate.source && candidate.source.primary_path ? candidate.source.primary_path : "unknown path";
+  return `${repo} :: ${path}`;
+}
+
+function renderCandidateList() {
+  const list = document.getElementById("candidateList");
+  const candidates = filteredCandidates();
+  if (!activeCandidateKey && candidates.length) activeCandidateKey = candidates[0].candidate_key;
+  list.innerHTML = candidates.map((candidate) => `
+    <button class="candidate-row ${candidate.candidate_key === activeCandidateKey ? "active" : ""}" data-key="${esc(candidate.candidate_key)}">
+      <span>${esc(candidateTitle(candidate))}</span>
+      <small>${esc(candidate.final_label)}</small>
+    </button>
+  `).join("") || `<p class="empty">No candidates</p>`;
+  list.querySelectorAll("button").forEach((button) => {
+    button.addEventListener("click", () => {
+      activeCandidateKey = button.dataset.key;
+      renderDetail();
+      renderCandidateList();
+    });
+  });
+}
+
+function activeCandidate() {
+  const candidates = filteredCandidates();
+  return candidates.find((candidate) => candidate.candidate_key === activeCandidateKey) || candidates[0] || null;
+}
+
+function chips(values) {
+  const items = Array.isArray(values) ? values : Object.entries(values || {}).map(([key, value]) => `${key}: ${value}`);
+  return `<div class="chips">${items.map((item) => `<span>${esc(item)}</span>`).join("")}</div>`;
+}
+
+function renderChecklist(items) {
+  return `<div class="checklist">${(items || []).map((item) => `
+    <div class="check ${item.passed ? "ok" : "missing"}">
+      <b>${esc(item.passed ? "OK" : "Missing")}</b>
+      <span>${esc(item.label)}</span>
+      <small>${esc(item.details || "")}</small>
+    </div>
+  `).join("")}</div>`;
+}
+
+function evidenceValue(row, key) {
+  const value = row[key];
+  if (Array.isArray(value)) return value.join(", ");
+  return value ?? "";
+}
+
+function renderEvidenceTable(title, rows) {
+  const fields = [
+    "signal", "signal_type", "near", "source_field", "file_path",
+    "patch_hunk_header", "patch_line_no", "new_file_line", "old_file_line",
+    "line_number", "context", "raw_path"
+  ];
+  if (!rows || !rows.length) {
+    return `<section class="evidence-section"><h3>${esc(title)}</h3><p class="empty">No evidence</p></section>`;
+  }
+  return `<section class="evidence-section">
+    <h3>${esc(title)}</h3>
+    <div class="table-wrap"><table>
+      <thead><tr>${fields.map((field) => `<th>${esc(field)}</th>`).join("")}</tr></thead>
+      <tbody>${rows.map((row) => `<tr>${fields.map((field) => `<td>${esc(evidenceValue(row, field))}</td>`).join("")}</tr>`).join("")}</tbody>
+    </table></div>
+  </section>`;
+}
+
+function renderRawPaths(paths) {
+  if (!paths || !paths.length) return `<p class="empty">No raw paths</p>`;
+  return `<ul class="raw-paths">${paths.map((path) => `<li>${esc(path)}</li>`).join("")}</ul>`;
+}
+
+function renderDetail() {
+  const detail = document.getElementById("detail");
+  const candidate = activeCandidate();
+  if (!candidate) {
+    detail.innerHTML = `<p class="empty">No candidate selected</p>`;
+    return;
+  }
+  activeCandidateKey = candidate.candidate_key;
+  const source = candidate.source || {};
+  const repo = candidate.repository || {};
+  const groups = candidate.evidence_groups || {};
+  detail.innerHTML = `
+    <div class="detail-header">
+      <div>
+        <p class="eyebrow">${esc(candidate.section_title)}</p>
+        <h2>${esc(candidateTitle(candidate))}</h2>
+      </div>
+      <span class="label">${esc(candidate.final_label)}</span>
+    </div>
+    <section class="facts">
+      <div><b>Repository</b><span>${link(repo.html_url, repo.full_name) || esc(repo.full_name || "")}</span></div>
+      <div><b>Commit</b><span>${link(source.commit_url, source.commit_sha) || esc(source.commit_sha || "")}</span></div>
+      <div><b>Pull request</b><span>${link(source.pr_url, source.pr_number ? `#${source.pr_number}` : "")}</span></div>
+      <div><b>Changed path</b><span>${esc(source.primary_path || "")}</span></div>
+    </section>
+    <section class="block"><h3>Reason Codes</h3>${chips(candidate.reason_codes || [])}</section>
+    <section class="block"><h3>Signals</h3>${chips(candidate.signals || {})}</section>
+    <section class="block"><h3>Migration Checklist</h3>${renderChecklist(candidate.migration_checklist || [])}</section>
+    ${renderEvidenceTable("PQC Added Evidence", groups.pqc_added)}
+    ${renderEvidenceTable("Legacy Removed Evidence", groups.legacy_removed)}
+    ${renderEvidenceTable("Intent Evidence", groups.intent)}
+    ${renderEvidenceTable("Hybrid Evidence", groups.hybrid)}
+    ${renderEvidenceTable("Partial Evidence", groups.partial)}
+    ${renderEvidenceTable("Full Evidence", groups.full)}
+    ${renderEvidenceTable("Exact Path Evidence", groups.exact_path)}
+    ${renderEvidenceTable("Other Review Evidence", groups.other)}
+    <section class="block"><h3>Raw Paths</h3>${renderRawPaths(candidate.raw_paths)}</section>
+  `;
+}
+
+function render() {
+  renderSummary();
+  renderSections();
+  renderCandidateList();
+  renderDetail();
+}
+
+document.getElementById("searchInput").addEventListener("input", (event) => {
+  query = event.target.value;
+  activeCandidateKey = null;
+  renderCandidateList();
+  renderDetail();
+});
+
+render();
+"""
+
+
+def _viewer_styles_css():
+    return """:root {
+  color-scheme: light;
+  --bg: #f5f7f9;
+  --panel: #ffffff;
+  --ink: #1b2633;
+  --muted: #667386;
+  --line: #d7dee8;
+  --accent: #116466;
+  --accent-soft: #d8eeee;
+  --warn: #b45309;
+  --ok: #166534;
+  --missing: #991b1b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 14px;
+}
+
+a {
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+
+.topbar {
+  min-height: 82px;
+  padding: 18px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  letter-spacing: 0;
+}
+
+h1 {
+  font-size: 24px;
+}
+
+h2 {
+  font-size: 20px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+h3 {
+  font-size: 15px;
+  margin-bottom: 10px;
+}
+
+.summary {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  color: var(--muted);
+  max-width: 55vw;
+}
+
+.summary span,
+.chips span,
+.label {
+  border: 1px solid var(--line);
+  background: #f8fafc;
+  border-radius: 999px;
+  padding: 5px 9px;
+  overflow-wrap: anywhere;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 360px) minmax(0, 1fr);
+  min-height: calc(100vh - 83px);
+}
+
+.sidebar {
+  border-right: 1px solid var(--line);
+  background: #eef3f6;
+  padding: 14px;
+  overflow: auto;
+}
+
+.section-nav,
+.candidate-list,
+.checklist,
+.chips {
+  display: grid;
+  gap: 8px;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.section-button,
+.candidate-row {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.section-button {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.section-button.active,
+.candidate-row.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.candidate-row span,
+.candidate-row small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.candidate-row small {
+  margin-top: 4px;
+  color: var(--muted);
+}
+
+.search {
+  display: grid;
+  gap: 5px;
+  margin: 14px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.search input {
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--ink);
+  background: var(--panel);
+}
+
+.detail {
+  padding: 20px 24px 40px;
+  overflow: auto;
+}
+
+.detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  border: 1px solid var(--line);
+  background: var(--line);
+  margin-bottom: 16px;
+}
+
+.facts div,
+.block,
+.evidence-section {
+  background: var(--panel);
+}
+
+.facts div {
+  padding: 12px;
+  min-width: 0;
+}
+
+.facts b,
+.facts span,
+.check span,
+.check small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.facts b,
+.check b {
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 5px;
+}
+
+.block,
+.evidence-section {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.checklist {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.check {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px;
+  min-height: 82px;
+  background: #fbfcfd;
+}
+
+.check.ok b {
+  color: var(--ok);
+}
+
+.check.missing b {
+  color: var(--missing);
+}
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 1100px;
+}
+
+th,
+td {
+  border-bottom: 1px solid var(--line);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+  max-width: 320px;
+  overflow-wrap: anywhere;
+}
+
+th {
+  position: sticky;
+  top: 0;
+  background: #edf2f7;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.raw-paths {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.raw-paths li {
+  margin: 4px 0;
+  overflow-wrap: anywhere;
+}
+
+.empty {
+  margin: 0;
+  color: var(--muted);
+}
+
+@media (max-width: 900px) {
+  .topbar,
+  .detail-header {
+    display: grid;
+  }
+
+  .summary {
+    max-width: none;
+    justify-content: flex-start;
+  }
+
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    max-height: 52vh;
+  }
+
+  .facts {
+    grid-template-columns: 1fr;
+  }
+}
+"""
+
+
+def write_viewer_files(dataset, root=None):
+    """Write the static manual review viewer files."""
+    paths = project_paths(root)
+    viewer_dir = paths["root"] / "view"
+    viewer_dir.mkdir(parents=True, exist_ok=True)
+    dataset_json = json.dumps(dataset, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+    embedded_json = json.dumps(dataset, sort_keys=True, ensure_ascii=True).replace("</", "<\\/")
+
+    data_path = viewer_dir / "viewer_data.json"
+    index_path = viewer_dir / "index.html"
+    app_path = viewer_dir / "app.js"
+    styles_path = viewer_dir / "styles.css"
+
+    data_path.write_text(dataset_json, encoding="utf-8")
+    index_path.write_text(_viewer_index_html(embedded_json), encoding="utf-8")
+    app_path.write_text(_viewer_app_js(), encoding="utf-8")
+    styles_path.write_text(_viewer_styles_css(), encoding="utf-8")
+
+    return {
+        "viewer_dir": str(viewer_dir),
+        "index_html": str(index_path),
+        "app_js": str(app_path),
+        "styles_css": str(styles_path),
+        "viewer_data_json": str(data_path),
+        "index_url": index_path.resolve().as_uri(),
     }
 
 

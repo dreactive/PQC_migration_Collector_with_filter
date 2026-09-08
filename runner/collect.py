@@ -34,11 +34,13 @@ from pqc_collector.pipeline import (  # noqa: E402
     run_f2_batch,
 )
 from pqc_collector.reports import (  # noqa: E402
+    build_viewer_dataset,
     build_filter_review_status,
     inspect_export_file,
     report_schemas,
     select_review_samples,
     summarize_filter_results,
+    write_viewer_files,
     write_dedupe_summary_report,
     write_filter_summary_json,
     write_filter_summary_md,
@@ -393,6 +395,17 @@ def build_parser():
         help="Project root used to resolve relative raw evidence paths.",
     )
     inspect_export.add_argument("--sample-limit", default=3, type=int)
+    build_viewer = subparsers.add_parser(
+        "build-viewer",
+        help="Build the static manual review viewer from export JSONL rows.",
+    )
+    build_viewer.add_argument("--source", required=True, type=Path)
+    build_viewer.add_argument(
+        "--root",
+        default=PROJECT_ROOT,
+        type=Path,
+        help="Project root used for relative source and generated view files.",
+    )
     return parser
 
 
@@ -639,6 +652,25 @@ def main(argv=None):
             schema_name=args.schema_name,
             sample_limit=args.sample_limit,
         )
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "build-viewer":
+        dataset = build_viewer_dataset(args.source, root=args.root)
+        paths = write_viewer_files(dataset, root=args.root)
+        result = {
+            "source_path": dataset["source_path"],
+            "status": dataset["status"],
+            "candidate_count": dataset["candidate_count"],
+            "invalid_json_line_count": dataset["invalid_json_line_count"],
+            "label_counts": dataset["label_counts"],
+            "sections": [
+                {"id": section["id"], "title": section["title"], "count": section["count"]}
+                for section in dataset["sections"]
+            ],
+            "viewer_paths": paths,
+            "sample_candidate": dataset["candidates"][0] if dataset["candidates"] else None,
+        }
         print(json.dumps(result, indent=2))
         return 0
 
