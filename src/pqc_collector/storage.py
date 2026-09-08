@@ -203,6 +203,39 @@ def init_f1_results_table(conn):
     conn.commit()
 
 
+def init_diff_evidence_table(conn):
+    """Create the D0 exact diff evidence result table."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS d0_results (
+            batch_id TEXT NOT NULL,
+            search_item_key TEXT NOT NULL,
+            file_key TEXT NOT NULL,
+            diff_file_key TEXT,
+            repository_full_name TEXT NOT NULL,
+            search_item_path TEXT NOT NULL,
+            commit_sha TEXT NOT NULL,
+            commit_url TEXT NOT NULL,
+            matched_changed_path TEXT,
+            exact_path_match INTEGER NOT NULL,
+            patch_available INTEGER NOT NULL,
+            passed INTEGER NOT NULL,
+            changed_files_json TEXT NOT NULL DEFAULT '[]',
+            review_evidence_json TEXT NOT NULL DEFAULT '[]',
+            reason_codes_json TEXT NOT NULL,
+            raw_commit_path TEXT NOT NULL,
+            patch_path TEXT,
+            checked_at TEXT NOT NULL,
+            PRIMARY KEY (batch_id, search_item_key, commit_sha),
+            FOREIGN KEY (batch_id, search_item_key)
+                REFERENCES f1_results (batch_id, search_item_key),
+            FOREIGN KEY (file_key) REFERENCES file_snapshots (file_key)
+        )
+        """
+    )
+    conn.commit()
+
+
 def init_db(conn):
     """Create the collector storage schema without deleting existing data."""
     init_query_pages_table(conn)
@@ -211,6 +244,7 @@ def init_db(conn):
     init_f0_results_table(conn)
     init_files_table(conn)
     init_f1_results_table(conn)
+    init_diff_evidence_table(conn)
 
 
 def write_raw_response(batch_id, response_kind, response_key, payload, root=None):
