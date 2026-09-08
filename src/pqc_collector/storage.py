@@ -818,6 +818,77 @@ def iter_f1_passed_items(conn, batch_id, limit=None):
         yield item
 
 
+def iter_d0_passed_rows(conn, batch_id, limit=None):
+    """Yield D0-passed rows as the F2 migration classifier input queue."""
+    params = [batch_id]
+    limit_clause = ""
+    if limit is not None:
+        limit_clause = "LIMIT ?"
+        params.append(max(0, int(limit)))
+
+    rows = conn.execute(
+        f"""
+        SELECT
+            d0_results.batch_id AS batch_id,
+            d0_results.search_item_key AS search_item_key,
+            d0_results.file_key AS file_key,
+            d0_results.diff_file_key AS diff_file_key,
+            raw_search_items.repository_id AS repository_id,
+            d0_results.repository_full_name AS repository_full_name,
+            raw_search_items.repository_url AS repository_url,
+            d0_results.search_item_path AS search_item_path,
+            d0_results.commit_sha AS commit_sha,
+            d0_results.commit_url AS commit_url,
+            d0_results.matched_changed_path AS matched_changed_path,
+            d0_results.changed_files_json AS changed_files_json,
+            d0_results.review_evidence_json AS review_evidence_json,
+            d0_results.reason_codes_json AS d0_reason_codes_json,
+            d0_results.raw_commit_path AS raw_commit_path,
+            d0_results.patch_path AS patch_path,
+            d0_results.checked_at AS d0_checked_at,
+            f1_results.language AS language,
+            f1_results.target_libraries_json AS target_libraries_json,
+            f1_results.matched_library_signals_json AS matched_library_signals_json,
+            f1_results.matched_pqc_api_signals_json AS matched_pqc_api_signals_json,
+            f1_results.matched_provider_signals_json AS matched_provider_signals_json,
+            f1_results.library_evidence_json AS library_evidence_json,
+            f1_results.strong_signal_evidence_json AS strong_signal_evidence_json,
+            f1_results.quality_json AS quality_json,
+            file_snapshots.raw_file_path AS raw_file_path
+        FROM d0_results
+        INNER JOIN raw_search_items
+            ON raw_search_items.batch_id = d0_results.batch_id
+            AND raw_search_items.search_item_key = d0_results.search_item_key
+        INNER JOIN f1_results
+            ON f1_results.batch_id = d0_results.batch_id
+            AND f1_results.search_item_key = d0_results.search_item_key
+        INNER JOIN file_snapshots
+            ON file_snapshots.file_key = d0_results.file_key
+        WHERE d0_results.batch_id = ?
+            AND d0_results.passed = 1
+        ORDER BY
+            d0_results.repository_full_name,
+            d0_results.search_item_path,
+            d0_results.commit_sha
+        {limit_clause}
+        """,
+        tuple(params),
+    ).fetchall()
+    for row in rows:
+        item = dict(row)
+        item["changed_files"] = json.loads(item.pop("changed_files_json"))
+        item["review_evidence"] = json.loads(item.pop("review_evidence_json"))
+        item["d0_reason_codes"] = json.loads(item.pop("d0_reason_codes_json"))
+        item["target_libraries"] = json.loads(item.pop("target_libraries_json"))
+        item["matched_library_signals"] = json.loads(item.pop("matched_library_signals_json"))
+        item["matched_pqc_api_signals"] = json.loads(item.pop("matched_pqc_api_signals_json"))
+        item["matched_provider_signals"] = json.loads(item.pop("matched_provider_signals_json"))
+        item["library_evidence"] = json.loads(item.pop("library_evidence_json"))
+        item["strong_signal_evidence"] = json.loads(item.pop("strong_signal_evidence_json"))
+        item["quality"] = json.loads(item.pop("quality_json"))
+        yield item
+
+
 def _file_payload(response):
     """Return a GitHub contents payload from either a raw payload or API wrapper."""
     if isinstance(response, dict) and "payload" in response:
