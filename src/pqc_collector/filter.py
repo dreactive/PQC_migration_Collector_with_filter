@@ -172,6 +172,20 @@ DEFAULT_LEGACY_REMOVED_SIGNALS = {
     "ECDSA": "legacy_removed",
     "RSA": "legacy_removed",
 }
+DEFAULT_HYBRID_TERMS = [
+    "hybrid",
+    "classical + post-quantum",
+    "classical and post-quantum",
+    "ECDH + ML-KEM",
+    "RSA + ML-KEM",
+    "X25519MLKEM768",
+    "SecP256r1MLKEM768",
+]
+DEFAULT_HYBRID_MESSAGE_TERMS = [
+    "hybrid key exchange",
+    "hybrid KEM",
+    "hybrid signature",
+]
 
 
 def _path_parts(path):
@@ -786,7 +800,9 @@ def detect_pqc_added(parsed_patch, config=None):
 def _legacy_removed_signals(config=None):
     if not config:
         return DEFAULT_LEGACY_REMOVED_SIGNALS
-    rules = config.get("legacy_removed_signals", config.get("legacy_signals", config))
+    rules = config.get("legacy_removed_signals", config.get("legacy_signals"))
+    if rules is None:
+        return DEFAULT_LEGACY_REMOVED_SIGNALS
     if isinstance(rules, dict):
         return rules
     return {str(signal): "legacy_removed" for signal in rules or []}
@@ -837,6 +853,123 @@ def detect_legacy_removed(parsed_patch, config=None):
         "reason_codes": (
             ["legacy_removed_in_diff"] if legacy_removed else ["no_legacy_removed_in_diff"]
         ),
+    }
+
+
+def _hybrid_terms(config=None):
+    if not config:
+        return DEFAULT_HYBRID_TERMS
+    return list(config.get("hybrid_terms", DEFAULT_HYBRID_TERMS))
+
+
+def _hybrid_message_terms(config=None):
+    if not config:
+        return DEFAULT_HYBRID_MESSAGE_TERMS
+    return list(config.get("hybrid_message_terms", DEFAULT_HYBRID_MESSAGE_TERMS))
+
+
+def _pqc_family_terms(config=None):
+    direct_rules, near_rules = _strong_pqc_rules(config)
+    terms = list(direct_rules.keys())
+    for rule in near_rules:
+        terms.extend(rule.get("near", []))
+    return _unique_values(terms)
+
+
+def _line_match(line, terms):
+    text = line.get("content") or ""
+    return [term for term in terms if _contains_signal(text, term)]
+
+
+def _message_evidence(message, matched_terms):
+    return [
+        {
+            "evidence_id": f"ev:msg:{index:03d}",
+            "supports": ["hybrid_signal_detected"],
+            "kind": "commit_message",
+            "repository_full_name": None,
+            "commit_sha": None,
+            "commit_url": None,
+            "file_path": None,
+            "patch_path": None,
+            "patch_hunk_header": None,
+            "patch_line_no": None,
+            "new_file_line": None,
+            "old_file_line": None,
+            "line_number": None,
+            "signal": term,
+            "signal_type": "hybrid",
+            "near": None,
+            "source_field": "commit_message",
+            "raw_path": None,
+            "context": str(message or "").strip(),
+            "matched_terms": [term],
+            "snippet": str(message or "").strip(),
+        }
+        for index, term in enumerate(matched_terms, start=1)
+    ]
+
+
+def detect_hybrid_signal(parsed_patch, message=None, config=None):
+    """Detect direct hybrid migration signals from added diff lines and message text."""
+    patch_lines = list(iter_patch_lines(parsed_patch))
+    added_lines = [line for line in patch_lines if line.get("kind") == "added"]
+    hybrid_terms = _hybrid_terms(config)
+    pqc_terms = _pqc_family_terms(config)
+    legacy_terms = list(_legacy_removed_signals(config).keys())
+    matches = []
+
+    for line in added_lines:
+        direct_terms = _line_match(line, hybrid_terms)
+        if direct_terms:
+            matches.append(
+                {
+                    "line_kinds": ["added"],
+                    "line_numbers": [line.get("patch_line_no")],
+                    "supports": ["hybrid_signal_detected"],
+                    "kind": "patch_added_line",
+                    "signal": direct_terms[0],
+                    "signal_type": "hybrid",
+                    "terms": direct_terms,
+                    "source_field": "patch",
+                }
+            )
+            continue
+
+        hunk_text = _line_hunk_text(line, patch_lines)
+        line_pqc_terms = _line_match(line, pqc_terms)
+        line_legacy_terms = _line_match(line, legacy_terms)
+        hunk_has_pqc = line_pqc_terms or any(_contains_signal(hunk_text, term) for term in pqc_terms)
+        hunk_has_legacy = line_legacy_terms or any(
+            _contains_signal(hunk_text, term) for term in legacy_terms
+        )
+        line_terms = line_pqc_terms or line_legacy_terms
+        if hunk_has_pqc and hunk_has_legacy and line_terms:
+            matches.append(
+                {
+                    "line_kinds": ["added"],
+                    "line_numbers": [line.get("patch_line_no")],
+                    "supports": ["hybrid_signal_detected"],
+                    "kind": "patch_added_line",
+                    "signal": "same_added_hunk_legacy_and_pqc",
+                    "signal_type": "hybrid",
+                    "terms": line_terms,
+                    "source_field": "patch",
+                }
+            )
+
+    evidence = build_line_evidence(patch_lines, matches)
+    message_terms = [term for term in _hybrid_message_terms(config) if _contains_signal(message or "", term)]
+    evidence.extend(_message_evidence(message, message_terms))
+    matched_terms = []
+    for row in evidence:
+        matched_terms.extend(row.get("matched_terms", []))
+    hybrid = bool(evidence)
+    return {
+        "hybrid_signal": hybrid,
+        "matched_terms": _unique_values(matched_terms),
+        "review_evidence": evidence,
+        "reason_codes": ["hybrid_signal_detected"] if hybrid else ["no_hybrid_signal"],
     }
 
 
