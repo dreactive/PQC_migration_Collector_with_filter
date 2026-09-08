@@ -1,0 +1,17 @@
+{
+  "legacy_families": [
+    "RSA",
+    "ECDH",
+    "ECDSA",
+    "X25519"
+  ],
+  "legacy_signals": {
+    "X25519": "legacy_removed",
+    "SecP256r1": "legacy_removed",
+    "P-256": "legacy_removed",
+    "prime256v1": "legacy_removed",
+    "ECDH": "legacy_removed",
+    "ECDSA": "legacy_removed",
+    "RSA": "legacy_removed"
+  }
+}

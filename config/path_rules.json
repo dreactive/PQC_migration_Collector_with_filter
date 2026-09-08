@@ -1,0 +1,39 @@
+{
+  "drop_source_kinds": [
+    "docs",
+    "dependency",
+    "vendor_or_generated",
+    "test",
+    "example",
+    "fuzz_or_benchmark",
+    "tooling_metadata"
+  ],
+  "drop_path_fragments": [
+    "/docs/",
+    "/doc/",
+    "/vendor/",
+    "/vendors/",
+    "/third_party/",
+    "/third-party/",
+    "/external/",
+    "/generated/",
+    "/build/",
+    "/dist/",
+    "/test/",
+    "/tests/",
+    "/example/",
+    "/examples/",
+    "/sample/",
+    "/samples/",
+    "/demo/",
+    "/demos/",
+    "/fuzz/",
+    "/benchmark/"
+  ],
+  "drop_file_names": [
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    ".ctags"
+  ]
+}

@@ -1,0 +1,62 @@
+{
+  "target_libraries": {
+    "JCE/JCA": {
+      "languages": [
+        "Java"
+      ],
+      "signals": [
+        "Cipher.getInstance",
+        "KeyPairGenerator.getInstance",
+        "KeyAgreement.getInstance",
+        "Signature.getInstance",
+        "AlgorithmParameters.getInstance",
+        "Security.addProvider",
+        "Security.getProvider"
+      ]
+    },
+    "Bouncy Castle": {
+      "languages": [
+        "Java",
+        "C#"
+      ],
+      "signals": [
+        "BouncyCastleProvider",
+        "BouncyCastlePQCProvider",
+        "BCPQC",
+        "org.bouncycastle",
+        "Org.BouncyCastle",
+        "KEMGenerateSpec",
+        "KEMExtractSpec",
+        "MLKEMParameterSpec",
+        "MLDSAParameterSpec"
+      ]
+    },
+    "wolfSSL": {
+      "languages": [
+        "C"
+      ],
+      "signals": [
+        "wolfSSL_",
+        "wolfSSL_CTX_",
+        "wc_",
+        "wc_MlKemKey_",
+        "WOLFSSL_HAVE_MLKEM",
+        "HAVE_PQC"
+      ]
+    },
+    "OpenSSL": {
+      "languages": [
+        "C"
+      ],
+      "signals": [
+        "EVP_PKEY_CTX_new_from_name",
+        "EVP_PKEY_encapsulate",
+        "EVP_PKEY_decapsulate",
+        "SSL_CTX_set1_groups",
+        "SSL_set1_groups",
+        "OSSL_PROVIDER_load",
+        "OPENSSL_init_ssl"
+      ]
+    }
+  }
+}

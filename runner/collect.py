@@ -12,6 +12,7 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from pqc_collector.config import load_config  # noqa: E402
 from pqc_collector.core import ensure_dirs, project_paths  # noqa: E402
 from pqc_collector.collect import (  # noqa: E402
     GitHubClient,
@@ -72,6 +73,15 @@ def load_env_file(path):
             os.environ[key] = value.strip().strip('"').strip("'")
             loaded.append(key)
     return loaded
+
+
+def load_filter_configs(root=PROJECT_ROOT):
+    """Load filter config files using the section names expected by filter.py."""
+    return {
+        "target_libraries": load_config("target_libraries", root),
+        "strong_pqc_signals": load_config("pqc_patterns", root),
+        "migration_rules": load_config("migration_rules", root),
+    }
 
 
 def store_sample_search(batch_id):
@@ -482,7 +492,13 @@ def main(argv=None):
                     "sample_row": None,
                 }
             else:
-                result = run_f0_batch(conn, batch_id, args.limit, PROJECT_ROOT)
+                result = run_f0_batch(
+                    conn,
+                    batch_id,
+                    args.limit,
+                    PROJECT_ROOT,
+                    rules=load_config("path_rules", PROJECT_ROOT),
+                )
                 result["requested_batch_id"] = "next" if args.next else args.batch_id
         finally:
             conn.close()
@@ -507,7 +523,13 @@ def main(argv=None):
         conn = connect(root=PROJECT_ROOT)
         try:
             init_db(conn)
-            result = run_f1_batch(conn, args.batch_id, args.limit, PROJECT_ROOT)
+            result = run_f1_batch(
+                conn,
+                args.batch_id,
+                args.limit,
+                PROJECT_ROOT,
+                configs=load_filter_configs(PROJECT_ROOT),
+            )
         finally:
             conn.close()
         print(json.dumps(result, indent=2))
@@ -565,7 +587,13 @@ def main(argv=None):
                     "sample_row": None,
                 }
             else:
-                result = run_f2_batch(conn, batch_id, args.limit, PROJECT_ROOT)
+                result = run_f2_batch(
+                    conn,
+                    batch_id,
+                    args.limit,
+                    PROJECT_ROOT,
+                    configs=load_filter_configs(PROJECT_ROOT),
+                )
                 result["requested_batch_id"] = args.batch_id
         finally:
             conn.close()

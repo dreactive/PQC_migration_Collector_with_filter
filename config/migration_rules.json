@@ -1,0 +1,82 @@
+{
+  "export_labels": [
+    "hybrid_migration",
+    "partial_migration",
+    "full_migration"
+  ],
+  "excluded_labels": [
+    "pqc_addition_only",
+    "dropped"
+  ],
+  "hybrid_terms": [
+    "hybrid",
+    "classical + post-quantum",
+    "classical and post-quantum",
+    "ECDH + ML-KEM",
+    "RSA + ML-KEM",
+    "X25519MLKEM768",
+    "SecP256r1MLKEM768"
+  ],
+  "hybrid_message_terms": [
+    "hybrid key exchange",
+    "hybrid KEM",
+    "hybrid signature"
+  ],
+  "migration_intent_terms": [
+    "migrate",
+    "migration",
+    "replace",
+    "switch",
+    "enable",
+    "add support",
+    "introduce",
+    "for client",
+    "for tls",
+    "for provider"
+  ],
+  "crypto_role_terms": [
+    "tls",
+    "ssl",
+    "crypto",
+    "key exchange",
+    "signature",
+    "cipher",
+    "provider",
+    "group",
+    "handshake"
+  ],
+  "partial_scope_terms": [
+    "client",
+    "server",
+    "provider",
+    "profile",
+    "platform",
+    "tls",
+    "config"
+  ],
+  "partial_feature_terms": [
+    "feature flag",
+    "optional",
+    "experimental",
+    "disabled by default",
+    "enable_",
+    "with_",
+    "use_"
+  ],
+  "full_migration_intent_terms": [
+    "replace",
+    "remove",
+    "drop",
+    "migrate from",
+    "switch from"
+  ],
+  "legacy_removed_signals": {
+    "X25519": "legacy_removed",
+    "SecP256r1": "legacy_removed",
+    "P-256": "legacy_removed",
+    "prime256v1": "legacy_removed",
+    "ECDH": "legacy_removed",
+    "ECDSA": "legacy_removed",
+    "RSA": "legacy_removed"
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "strong_pqc_signals": {
+    "direct": {
+      "BouncyCastlePQCProvider": "pqc_api",
+      "MLKEMParameterSpec": "pqc_api",
+      "MLDSAParameterSpec": "pqc_api",
+      "wc_MlKemKey_": "pqc_api",
+      "WC_ML_KEM": "pqc_api",
+      "OQS_KEM_new": "pqc_api",
+      "OQS_KEM_encaps": "pqc_api",
+      "OQS_KEM_decaps": "pqc_api",
+      "OQS_SIG_new": "pqc_api",
+      "OQS_SIG_sign": "pqc_api",
+      "OQS_SIG_verify": "pqc_api",
+      "X25519MLKEM768": "pqc_group",
+      "SecP256r1MLKEM768": "pqc_group"
+    },
+    "near": [
+      {
+        "signal": "EVP_PKEY_CTX_new_from_name",
+        "near": [
+          "ML-KEM",
+          "MLKEM",
+          "ML-DSA",
+          "MLDSA"
+        ],
+        "signal_type": "pqc_api"
+      },
+      {
+        "signal": "EVP_PKEY_encapsulate",
+        "near": [
+          "ML-KEM",
+          "MLKEM",
+          "KEM"
+        ],
+        "signal_type": "pqc_api"
+      },
+      {
+        "signal": "EVP_PKEY_decapsulate",
+        "near": [
+          "ML-KEM",
+          "MLKEM",
+          "KEM"
+        ],
+        "signal_type": "pqc_api"
+      },
+      {
+        "signal": "SSL_CTX_set1_groups",
+        "near": [
+          "X25519MLKEM768",
+          "SecP256r1MLKEM768",
+          "MLKEM"
+        ],
+        "signal_type": "pqc_group"
+      },
+      {
+        "signal": "SSL_set1_groups",
+        "near": [
+          "X25519MLKEM768",
+          "SecP256r1MLKEM768",
+          "MLKEM"
+        ],
+        "signal_type": "pqc_group"
+      },
+      {
+        "signal": "OSSL_PROVIDER_load",
+        "near": [
+          "oqsprovider",
+          "oqs-provider",
+          "oqs"
+        ],
+        "signal_type": "provider"
+      }
+    ]
+  }
+}
