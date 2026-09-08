@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from pqc_collector.core import (
+    diff_file_key as make_diff_file_key,
     file_key,
     normalize_path,
     project_paths,
@@ -1057,6 +1058,117 @@ def upsert_f1_result(conn, batch_id, row):
             json.dumps(values["quality"], ensure_ascii=True, sort_keys=True),
             json.dumps(values["reason_codes"], ensure_ascii=True, sort_keys=True),
             values["raw_file_path"],
+            values["checked_at"],
+        ),
+    )
+    conn.commit()
+
+    values["status"] = status
+    return values
+
+
+def _d0_diff_file_key(row):
+    key = row.get("diff_file_key")
+    if key:
+        return key
+    repository_id = row.get("repository_id")
+    commit_sha = row.get("commit_sha")
+    path = row.get("matched_changed_path") or row.get("search_item_path")
+    if repository_id is None or not commit_sha or not path:
+        return None
+    return make_diff_file_key(repository_id, commit_sha, path)
+
+
+def upsert_diff_evidence(conn, batch_id, row):
+    """Insert or update one D0 exact diff evidence result row."""
+    existing = conn.execute(
+        """
+        SELECT 1 FROM d0_results
+        WHERE batch_id = ? AND search_item_key = ? AND commit_sha = ?
+        """,
+        (batch_id, row["search_item_key"], row["commit_sha"]),
+    ).fetchone()
+    status = "updated" if existing else "new"
+    values = {
+        "batch_id": batch_id,
+        "search_item_key": row["search_item_key"],
+        "file_key": row["file_key"],
+        "diff_file_key": _d0_diff_file_key(row),
+        "repository_full_name": row["repository_full_name"],
+        "search_item_path": row["search_item_path"],
+        "commit_sha": row["commit_sha"],
+        "commit_url": row["commit_url"],
+        "matched_changed_path": row.get("matched_changed_path"),
+        "exact_path_match": bool(row.get("exact_path_match")),
+        "patch_available": bool(row.get("patch_available")),
+        "passed": bool(row.get("passed")),
+        "changed_files": list(row.get("changed_files", [])),
+        "review_evidence": list(row.get("review_evidence", [])),
+        "reason_codes": list(row.get("reason_codes", [])),
+        "raw_commit_path": row["raw_commit_path"],
+        "patch_path": row.get("patch_path"),
+        "checked_at": row.get("checked_at")
+        or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+    conn.execute(
+        """
+        INSERT INTO d0_results (
+            batch_id,
+            search_item_key,
+            file_key,
+            diff_file_key,
+            repository_full_name,
+            search_item_path,
+            commit_sha,
+            commit_url,
+            matched_changed_path,
+            exact_path_match,
+            patch_available,
+            passed,
+            changed_files_json,
+            review_evidence_json,
+            reason_codes_json,
+            raw_commit_path,
+            patch_path,
+            checked_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(batch_id, search_item_key, commit_sha) DO UPDATE SET
+            file_key = excluded.file_key,
+            diff_file_key = excluded.diff_file_key,
+            repository_full_name = excluded.repository_full_name,
+            search_item_path = excluded.search_item_path,
+            commit_url = excluded.commit_url,
+            matched_changed_path = excluded.matched_changed_path,
+            exact_path_match = excluded.exact_path_match,
+            patch_available = excluded.patch_available,
+            passed = excluded.passed,
+            changed_files_json = excluded.changed_files_json,
+            review_evidence_json = excluded.review_evidence_json,
+            reason_codes_json = excluded.reason_codes_json,
+            raw_commit_path = excluded.raw_commit_path,
+            patch_path = excluded.patch_path,
+            checked_at = excluded.checked_at
+        """,
+        (
+            values["batch_id"],
+            values["search_item_key"],
+            values["file_key"],
+            values["diff_file_key"],
+            values["repository_full_name"],
+            values["search_item_path"],
+            values["commit_sha"],
+            values["commit_url"],
+            values["matched_changed_path"],
+            int(values["exact_path_match"]),
+            int(values["patch_available"]),
+            int(values["passed"]),
+            json.dumps(values["changed_files"], ensure_ascii=True, sort_keys=True),
+            json.dumps(values["review_evidence"], ensure_ascii=True, sort_keys=True),
+            json.dumps(values["reason_codes"], ensure_ascii=True, sort_keys=True),
+            values["raw_commit_path"],
+            values["patch_path"],
             values["checked_at"],
         ),
     )
