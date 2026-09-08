@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -261,6 +262,19 @@ def write_raw_response(batch_id, response_kind, response_key, payload, root=None
     with output_path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=True, indent=2, sort_keys=True)
         handle.write("\n")
+    return output_path
+
+
+def write_raw_patch(batch_id, response_key, patch_text, root=None):
+    """Write one raw changed-file patch and return its path."""
+    raw_dir = project_paths(root)["raw_github"] / str(batch_id)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    safe_key = hashlib.sha256(str(response_key).encode("utf-8")).hexdigest()
+    output_path = raw_dir / f"diff_file_{safe_key}.patch"
+    with output_path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(str(patch_text or ""))
+        if patch_text and not str(patch_text).endswith("\n"):
+            handle.write("\n")
     return output_path
 
 
