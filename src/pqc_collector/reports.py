@@ -801,6 +801,106 @@ def summarize_d0_results(rows):
     return summary
 
 
+def normalize_f2_report_row(batch_id, row):
+    """Return one F2 report row with the public JSONL schema."""
+    item = dict(row)
+    changed_path = item.get("matched_changed_path")
+    changed_files = _json_list_field(item, "changed_files")
+    if changed_path and changed_path not in changed_files:
+        changed_files = [changed_path, *changed_files]
+    repository = {
+        "id": item.get("repository_id"),
+        "full_name": item["repository_full_name"],
+        "html_url": item.get("repository_url"),
+    }
+    source = {
+        "commit_sha": item["commit_sha"],
+        "commit_url": item["commit_url"],
+        "pr_number": item.get("pr_number"),
+        "pr_url": item.get("pr_url"),
+        "primary_path": changed_path,
+        "changed_paths": changed_files,
+        "raw_commit_path": item.get("raw_commit_path"),
+        "patch_path": item.get("patch_path"),
+    }
+    review_evidence = _json_list_field(item, "review_evidence")
+    return {
+        "batch_id": batch_id,
+        "candidate_evidence_key": item["candidate_evidence_key"],
+        "search_item_key": item["search_item_key"],
+        "file_key": item["file_key"],
+        "diff_file_key": item.get("diff_file_key"),
+        "repository": repository,
+        "source": source,
+        "final_label": item["final_label"],
+        "classification": _json_dict_field(item, "classification"),
+        "signals": _json_dict_field(item, "signals"),
+        "reason_codes": _json_list_field(item, "reason_codes"),
+        "review_evidence": review_evidence,
+        "evidence": review_evidence,
+        "quality": _json_dict_field(item, "quality"),
+        "checked_at": item["checked_at"],
+    }
+
+
+def write_f2_report(rows, batch_id, output_path=None, root=None):
+    """Write F2 migration classifier rows for one batch as JSONL."""
+    report_path = output_path or report_paths(batch_id, root)["filter"]["filter_f2_migration_classifier"]
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    normalized_rows = []
+    for row in rows:
+        item = dict(row)
+        if item.get("batch_id", batch_id) == batch_id:
+            normalized_rows.append(normalize_f2_report_row(batch_id, item))
+    normalized_rows.sort(
+        key=lambda row: (
+            row["final_label"],
+            row["repository"]["full_name"],
+            row["source"]["primary_path"] or "",
+            row["source"]["commit_sha"],
+        )
+    )
+
+    with report_path.open("w", encoding="utf-8") as handle:
+        for row in normalized_rows:
+            handle.write(json.dumps(row, ensure_ascii=True, sort_keys=True))
+            handle.write("\n")
+    return report_path
+
+
+def summarize_f2_results(rows):
+    """Return label, signal, and evidence counts for F2 classifier results."""
+    summary = {
+        "total": 0,
+        "label_counts": {},
+        "reason_counts": {},
+        "signal_true_counts": {},
+        "review_evidence_count": 0,
+        "rows_without_review_evidence": 0,
+    }
+    for row in rows:
+        item = dict(row)
+        final_label = item.get("final_label") or "unknown"
+        signals = _json_dict_field(item, "signals")
+        review_evidence = _json_list_field(item, "review_evidence")
+
+        summary["total"] += 1
+        summary["label_counts"][final_label] = summary["label_counts"].get(final_label, 0) + 1
+        summary["review_evidence_count"] += len(review_evidence)
+        if not review_evidence:
+            summary["rows_without_review_evidence"] += 1
+        for reason_code in _json_list_field(item, "reason_codes"):
+            summary["reason_counts"][reason_code] = summary["reason_counts"].get(reason_code, 0) + 1
+        for signal_name, value in signals.items():
+            if value is True:
+                counts = summary["signal_true_counts"]
+                counts[signal_name] = counts.get(signal_name, 0) + 1
+
+    for key in ("label_counts", "reason_counts", "signal_true_counts"):
+        summary[key] = dict(sorted(summary[key].items()))
+    return summary
+
+
 def write_dedupe_summary_report(
     conn,
     batch_id,
