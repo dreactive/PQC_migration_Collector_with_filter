@@ -33,7 +33,11 @@ from pqc_collector.pipeline import (  # noqa: E402
 )
 from pqc_collector.reports import (  # noqa: E402
     report_schemas,
+    select_review_samples,
+    summarize_filter_results,
     write_dedupe_summary_report,
+    write_filter_summary_json,
+    write_filter_summary_md,
     write_query_pages_report,
     write_raw_search_items_report,
     write_schema_preview,
@@ -200,6 +204,22 @@ def cleanup_sample_search(batch_id, apply=False):
     }
 
 
+def resolve_report_batch_id(conn, batch_id):
+    """Resolve report-oriented batch aliases without starting a pipeline stage."""
+    if batch_id != "latest":
+        return batch_id
+    row = conn.execute(
+        """
+        SELECT batch_id
+        FROM f2_results
+        GROUP BY batch_id
+        ORDER BY MAX(checked_at) DESC, batch_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return row["batch_id"] if row else None
+
+
 def check_rate_limit(batch_id):
     """Call GitHub /rate_limit once, store raw response, and return a summary."""
     loaded_env_keys = load_env_file(PROJECT_ROOT / ".env")
@@ -313,6 +333,12 @@ def build_parser():
     )
     run_d0.add_argument("--batch-id", required=True)
     run_d0.add_argument("--limit", default=None, type=int)
+    report_filters = subparsers.add_parser(
+        "report-filters",
+        help="Write filter summaries and print review samples for one batch.",
+    )
+    report_filters.add_argument("--batch-id", required=True)
+    report_filters.add_argument("--sample-limit", default=3, type=int)
     return parser
 
 
@@ -448,6 +474,45 @@ def main(argv=None):
         try:
             init_db(conn)
             result = run_d0_batch(conn, args.batch_id, client, args.limit, PROJECT_ROOT)
+        finally:
+            conn.close()
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "report-filters":
+        conn = connect(root=PROJECT_ROOT)
+        try:
+            init_db(conn)
+            batch_id = resolve_report_batch_id(conn, args.batch_id)
+            if batch_id is None:
+                result = {
+                    "requested_batch_id": args.batch_id,
+                    "batch_id": None,
+                    "status": "no_f2_results",
+                    "report_paths": {},
+                    "summary": {},
+                    "review_samples": {},
+                }
+            else:
+                summary = summarize_filter_results(conn, batch_id)
+                summary_json_path = write_filter_summary_json(summary, batch_id, root=PROJECT_ROOT)
+                summary_md_path = write_filter_summary_md(summary, batch_id, root=PROJECT_ROOT)
+                review_samples = select_review_samples(
+                    conn,
+                    batch_id,
+                    limit_per_label=args.sample_limit,
+                )
+                result = {
+                    "requested_batch_id": args.batch_id,
+                    "batch_id": batch_id,
+                    "status": "completed",
+                    "report_paths": {
+                        "filter_summary_json": str(summary_json_path),
+                        "filter_summary_md": str(summary_md_path),
+                    },
+                    "summary": summary,
+                    "review_samples": review_samples,
+                }
         finally:
             conn.close()
         print(json.dumps(result, indent=2))
