@@ -1659,9 +1659,11 @@ def classify_migration(diff_row, configs=None):
         "diff_file_key": _diff_row_value(diff_row, "diff_file_key"),
         "repository_id": _diff_row_value(diff_row, "repository_id"),
         "repository_full_name": _diff_row_value(diff_row, "repository_full_name"),
+        "repository_url": _diff_row_value(diff_row, "repository_url"),
         "commit_sha": _diff_row_value(diff_row, "commit_sha"),
         "commit_url": _diff_row_value(diff_row, "commit_url"),
         "matched_changed_path": path,
+        "changed_files": _diff_row_value(diff_row, "changed_files", default=[]),
         "patch_path": _diff_row_value(diff_row, "patch_path"),
         "raw_commit_path": _diff_row_value(diff_row, "raw_commit_path"),
         "final_label": final_label,
@@ -1677,6 +1679,7 @@ def classify_migration(diff_row, configs=None):
         },
         "reason_codes": reason_codes,
         "review_evidence": _enrich_f2_evidence(decision_evidence, diff_row),
+        "quality": _diff_row_quality(diff_row),
     }
 
 

@@ -1,9 +1,13 @@
 """Batch pipeline orchestration for collector and filter stages."""
 
 import hashlib
+import json
+from datetime import datetime, timezone
+from pathlib import Path
 
 from pqc_collector.core import file_key
 from pqc_collector.filter import (
+    classify_migration,
     find_exact_changed_file,
     run_d0_for_item as build_d0_row,
     run_f0_for_item,
@@ -13,18 +17,22 @@ from pqc_collector.reports import (
     summarize_d0_results,
     summarize_f0_results,
     summarize_f1_results,
+    summarize_f2_results,
     write_d0_report,
     write_f0_report,
     write_f1_report,
+    write_f2_report,
 )
 from pqc_collector.storage import (
     iter_f0_passed_items,
     iter_f1_passed_items,
+    iter_d0_passed_rows,
     iter_files_for_f1,
     iter_raw_search_items,
     read_file_snapshot,
     upsert_diff_evidence,
     upsert_f0_result,
+    upsert_f2_result,
     upsert_f1_result,
     upsert_file_snapshot,
     write_raw_patch,
@@ -272,4 +280,66 @@ def run_d0_batch(conn, batch_id, client, limit=None, root=None, checked_at=None)
         "summary": summary,
         "sample_row": d0_rows[0] if d0_rows else None,
         "sample_outcome": outcomes[0] if outcomes else None,
+    }
+
+
+def _read_text_file(path):
+    if not path:
+        return ""
+    return Path(path).read_text(encoding="utf-8")
+
+
+def _read_json_file(path):
+    if not path:
+        return {}
+    with Path(path).open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _commit_message_from_raw(raw_commit_path):
+    raw = _read_json_file(raw_commit_path)
+    payload = raw.get("payload", raw) if isinstance(raw, dict) else {}
+    commit = payload.get("commit", {}) if isinstance(payload, dict) else {}
+    return commit.get("message") or payload.get("message") or ""
+
+
+def _f2_input_row(item):
+    row = dict(item)
+    row["patch"] = _read_text_file(row.get("patch_path"))
+    row["message"] = _commit_message_from_raw(row.get("raw_commit_path"))
+    return row
+
+
+def run_f2_batch(conn, batch_id, limit=None, root=None, configs=None, checked_at=None):
+    """Run F2 migration classification for D0-passed exact diff rows."""
+    queue = list(iter_d0_passed_rows(conn, batch_id, limit))
+    f2_rows = []
+    new_result_count = 0
+    updated_result_count = 0
+    timestamp = checked_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    for item in queue:
+        f2_row = classify_migration(_f2_input_row(item), configs=configs)
+        f2_row["checked_at"] = timestamp
+        stored_row = upsert_f2_result(conn, batch_id, f2_row)
+        if stored_row["status"] == "new":
+            new_result_count += 1
+        else:
+            updated_result_count += 1
+        f2_rows.append(stored_row)
+
+    report_path = write_f2_report(f2_rows, batch_id, root=root)
+    summary = summarize_f2_results(f2_rows)
+    return {
+        "batch_id": batch_id,
+        "status": "completed",
+        "queued_item_count": len(queue),
+        "processed_item_count": len(f2_rows),
+        "new_result_count": new_result_count,
+        "updated_result_count": updated_result_count,
+        "report_paths": {
+            "filter_f2_migration_classifier": str(report_path),
+        },
+        "summary": summary,
+        "sample_row": f2_rows[0] if f2_rows else None,
     }
