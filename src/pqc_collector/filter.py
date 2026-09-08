@@ -209,6 +209,24 @@ DEFAULT_CRYPTO_ROLE_TERMS = [
     "group",
     "handshake",
 ]
+DEFAULT_PARTIAL_SCOPE_TERMS = [
+    "client",
+    "server",
+    "provider",
+    "profile",
+    "platform",
+    "tls",
+    "config",
+]
+DEFAULT_PARTIAL_FEATURE_TERMS = [
+    "feature flag",
+    "optional",
+    "experimental",
+    "disabled by default",
+    "enable_",
+    "with_",
+    "use_",
+]
 
 
 def _path_parts(path):
@@ -1198,6 +1216,105 @@ def detect_replacement_signal(parsed_patch, pqc_result=None, legacy_result=None,
         "matched_terms": _unique_values(matched_terms),
         "review_evidence": _renumber_evidence(evidence),
         "reason_codes": [reason_code, "replacement_signal"],
+    }
+
+
+def _partial_scope_terms(config=None):
+    if not config:
+        return DEFAULT_PARTIAL_SCOPE_TERMS
+    return list(config.get("partial_scope_terms", DEFAULT_PARTIAL_SCOPE_TERMS))
+
+
+def _partial_feature_terms(config=None):
+    if not config:
+        return DEFAULT_PARTIAL_FEATURE_TERMS
+    return list(config.get("partial_feature_terms", DEFAULT_PARTIAL_FEATURE_TERMS))
+
+
+def _partial_patch_evidence(parsed_patch, config=None):
+    patch_lines = list(iter_patch_lines(parsed_patch))
+    matches = []
+    for line in patch_lines:
+        if line.get("kind") != "added":
+            continue
+        matched_terms = _line_match(line, _partial_feature_terms(config))
+        if not matched_terms:
+            continue
+        matches.append(
+            {
+                "line_kinds": ["added"],
+                "line_numbers": [line.get("patch_line_no")],
+                "supports": ["partial_feature_flag"],
+                "kind": "patch_added_line",
+                "signal": matched_terms[0],
+                "signal_type": "partial_scope",
+                "terms": matched_terms,
+                "source_field": "patch",
+            }
+        )
+    return build_line_evidence(patch_lines, matches)
+
+
+def detect_partial_scope_signal(parsed_patch, message=None, path=None, config=None):
+    """Detect partial migration scope hints from path, message, and added diff lines."""
+    evidence = []
+    matched_terms = []
+    reason_codes = []
+
+    normalized_path = normalize_path(path)
+    path_terms = [
+        term for term in _partial_scope_terms(config) if _contains_signal(normalized_path, term)
+    ]
+    if path_terms:
+        evidence.extend(
+            _text_evidence(
+                "changed_path",
+                "changed_path",
+                "partial_scope_path",
+                ["partial_scope_module_only"],
+                normalized_path,
+                path_terms,
+            )
+        )
+        matched_terms.extend(path_terms)
+        reason_codes.append("partial_scope_module_only")
+
+    message_scope_terms = [
+        term for term in _partial_scope_terms(config) if _contains_signal(message or "", term)
+    ]
+    message_intent_terms = [
+        term for term in _migration_intent_terms(config) if _contains_signal(message or "", term)
+    ]
+    if message_scope_terms or message_intent_terms:
+        terms = _unique_values([*message_scope_terms, *message_intent_terms])
+        evidence.extend(
+            _text_evidence(
+                "commit_message",
+                "commit_message",
+                "partial_scope",
+                ["partial_scope_module_only"],
+                message,
+                terms,
+            )
+        )
+        matched_terms.extend(terms)
+        reason_codes.append("partial_scope_module_only")
+
+    feature_evidence = _partial_patch_evidence(parsed_patch, config)
+    if feature_evidence:
+        evidence.extend(feature_evidence)
+        for row in feature_evidence:
+            matched_terms.extend(row.get("matched_terms", []))
+        reason_codes.append("partial_feature_flag")
+
+    partial_scope = bool(evidence)
+    return {
+        "partial_scope_signal": partial_scope,
+        "matched_terms": _unique_values(matched_terms),
+        "review_evidence": _renumber_evidence(evidence),
+        "reason_codes": _unique_values(reason_codes)
+        if partial_scope
+        else ["no_partial_scope_signal"],
     }
 
 
