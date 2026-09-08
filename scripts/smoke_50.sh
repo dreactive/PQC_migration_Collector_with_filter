@@ -1,12 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PATH="/usr/bin:/bin:/mingw64/bin:${PATH:-}"
+
+SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
+if [[ "$SCRIPT_DIR" == "${BASH_SOURCE[0]}" ]]; then
+  SCRIPT_DIR="."
+fi
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT_DIR"
 
 BATCH="${1:-${BATCH:-batch-smoke-50-20260908}}"
 DEFAULT_PY="/c/Users/dreac/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe"
 PY_BIN="${PY:-$DEFAULT_PY}"
+if command -v cygpath >/dev/null 2>&1 && [[ "$PY_BIN" == *\\* ]]; then
+  PY_BIN="$(cygpath -u "$PY_BIN")"
+fi
 
 if [[ ! -x "$PY_BIN" ]]; then
   if command -v python >/dev/null 2>&1; then
