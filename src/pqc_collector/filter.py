@@ -611,6 +611,47 @@ def extract_removed_lines(hunks):
     return [line for line in iter_patch_lines(hunks) if line.get("kind") == "removed"]
 
 
+def _changed_file_current_path(changed_file):
+    if not isinstance(changed_file, dict):
+        return ""
+    return changed_file.get("filename") or changed_file.get("path") or ""
+
+
+def find_exact_changed_file(search_path, changed_files):
+    """Return the changed file whose current path exactly matches search_path."""
+    normalized_search_path = normalize_path(search_path)
+    if not normalized_search_path:
+        return None
+
+    for index, changed_file in enumerate(changed_files or []):
+        if not isinstance(changed_file, dict):
+            continue
+        changed_path = _changed_file_current_path(changed_file)
+        normalized_changed_path = normalize_path(changed_path)
+        if normalized_changed_path != normalized_search_path:
+            continue
+
+        patch = changed_file.get("patch")
+        return {
+            "search_path": search_path,
+            "normalized_search_path": normalized_search_path,
+            "changed_file_index": index,
+            "changed_path": changed_path,
+            "normalized_changed_path": normalized_changed_path,
+            "status": changed_file.get("status"),
+            "sha": changed_file.get("sha"),
+            "additions": int(changed_file.get("additions") or 0),
+            "deletions": int(changed_file.get("deletions") or 0),
+            "changes": int(changed_file.get("changes") or 0),
+            "patch": patch,
+            "patch_available": bool(patch),
+            "blob_url": changed_file.get("blob_url"),
+            "raw_url": changed_file.get("raw_url"),
+            "contents_url": changed_file.get("contents_url"),
+        }
+    return None
+
+
 def is_documentation_path(path):
     """Return True for docs, README, changelog, license-like paths."""
     parts = _path_parts(path)
