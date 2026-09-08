@@ -704,6 +704,71 @@ def iter_files_for_f1(conn, batch_id, limit=None):
         yield item
 
 
+def iter_f1_passed_items(conn, batch_id, limit=None):
+    """Yield F1-passed rows as the D0 diff evidence input queue."""
+    params = [batch_id]
+    limit_clause = ""
+    if limit is not None:
+        limit_clause = "LIMIT ?"
+        params.append(max(0, int(limit)))
+
+    rows = conn.execute(
+        f"""
+        SELECT
+            raw_search_items.batch_id AS batch_id,
+            raw_search_items.search_item_key AS search_item_key,
+            raw_search_items.query_key AS query_key,
+            raw_search_items.repository_key AS repository_key,
+            raw_search_items.repository_id AS repository_id,
+            raw_search_items.repository_full_name AS repository_full_name,
+            raw_search_items.repository_url AS repository_url,
+            raw_search_items.path AS search_item_path,
+            raw_search_items.normalized_path AS normalized_path,
+            raw_search_items.blob_sha AS blob_sha,
+            raw_search_items.file_api_url AS file_api_url,
+            raw_search_items.html_url AS search_item_html_url,
+            raw_search_items.raw_query_page_path AS raw_query_page_path,
+            file_snapshots.file_key AS file_key,
+            file_snapshots.raw_file_path AS raw_file_path,
+            f1_results.language AS language,
+            f1_results.target_libraries_json AS target_libraries_json,
+            f1_results.matched_library_signals_json AS matched_library_signals_json,
+            f1_results.matched_pqc_api_signals_json AS matched_pqc_api_signals_json,
+            f1_results.matched_provider_signals_json AS matched_provider_signals_json,
+            f1_results.library_evidence_json AS library_evidence_json,
+            f1_results.strong_signal_evidence_json AS strong_signal_evidence_json,
+            f1_results.quality_json AS quality_json,
+            f1_results.reason_codes_json AS f1_reason_codes_json,
+            f1_results.checked_at AS f1_checked_at
+        FROM f1_results
+        INNER JOIN raw_search_items
+            ON raw_search_items.batch_id = f1_results.batch_id
+            AND raw_search_items.search_item_key = f1_results.search_item_key
+        INNER JOIN file_snapshots
+            ON file_snapshots.file_key = f1_results.file_key
+        WHERE f1_results.batch_id = ?
+            AND f1_results.passed = 1
+        ORDER BY
+            raw_search_items.repository_full_name,
+            raw_search_items.normalized_path,
+            raw_search_items.blob_sha
+        {limit_clause}
+        """,
+        tuple(params),
+    ).fetchall()
+    for row in rows:
+        item = dict(row)
+        item["target_libraries"] = json.loads(item.pop("target_libraries_json"))
+        item["matched_library_signals"] = json.loads(item.pop("matched_library_signals_json"))
+        item["matched_pqc_api_signals"] = json.loads(item.pop("matched_pqc_api_signals_json"))
+        item["matched_provider_signals"] = json.loads(item.pop("matched_provider_signals_json"))
+        item["library_evidence"] = json.loads(item.pop("library_evidence_json"))
+        item["strong_signal_evidence"] = json.loads(item.pop("strong_signal_evidence_json"))
+        item["quality"] = json.loads(item.pop("quality_json"))
+        item["f1_reason_codes"] = json.loads(item.pop("f1_reason_codes_json"))
+        yield item
+
+
 def _file_payload(response):
     """Return a GitHub contents payload from either a raw payload or API wrapper."""
     if isinstance(response, dict) and "payload" in response:
