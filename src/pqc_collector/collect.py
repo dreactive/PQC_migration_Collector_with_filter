@@ -109,6 +109,11 @@ class GitHubClient:
             },
         )
 
+    def get_commit(self, repo, sha):
+        """Fetch one GitHub commit detail response."""
+        full_name = repo.get("full_name") if isinstance(repo, dict) else str(repo)
+        return self.get_json(f"/repos/{full_name}/commits/{sha}")
+
 
 def _resource_snapshot(resources, name):
     resource = resources.get(name, {})
