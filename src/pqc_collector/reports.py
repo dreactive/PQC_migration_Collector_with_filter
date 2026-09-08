@@ -183,13 +183,18 @@ REPORT_SCHEMAS = {
         "required_fields": [
             "batch_id",
             "search_item_key",
+            "file_key",
+            "diff_file_key",
             "repository_full_name",
             "search_item_path",
             "commit_sha",
+            "commit_url",
             "matched_changed_path",
             "exact_path_match",
             "patch_available",
             "passed",
+            "changed_files",
+            "review_evidence",
             "reason_codes",
             "raw_commit_path",
             "patch_path",
@@ -715,6 +720,84 @@ def summarize_f1_results(rows):
         "reason_counts",
     ):
         summary[key] = dict(sorted(summary[key].items()))
+    return summary
+
+
+def normalize_d0_report_row(batch_id, row):
+    """Return one D0 report row with the public JSONL schema."""
+    item = dict(row)
+    return {
+        "batch_id": batch_id,
+        "search_item_key": item["search_item_key"],
+        "file_key": item["file_key"],
+        "diff_file_key": item.get("diff_file_key"),
+        "repository_full_name": item["repository_full_name"],
+        "search_item_path": item["search_item_path"],
+        "commit_sha": item["commit_sha"],
+        "commit_url": item["commit_url"],
+        "matched_changed_path": item.get("matched_changed_path"),
+        "exact_path_match": bool(item["exact_path_match"]),
+        "patch_available": bool(item["patch_available"]),
+        "passed": bool(item["passed"]),
+        "changed_files": _json_list_field(item, "changed_files"),
+        "review_evidence": _json_list_field(item, "review_evidence"),
+        "reason_codes": _json_list_field(item, "reason_codes"),
+        "raw_commit_path": item["raw_commit_path"],
+        "patch_path": item.get("patch_path"),
+        "checked_at": item["checked_at"],
+    }
+
+
+def write_d0_report(rows, batch_id, output_path=None, root=None):
+    """Write D0 exact diff evidence rows for one batch as JSONL."""
+    report_path = output_path or report_paths(batch_id, root)["filter"]["filter_d0_diff_evidence"]
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    normalized_rows = []
+    for row in rows:
+        item = dict(row)
+        if item.get("batch_id", batch_id) == batch_id:
+            normalized_rows.append(normalize_d0_report_row(batch_id, item))
+    normalized_rows.sort(
+        key=lambda row: (
+            row["passed"],
+            row["repository_full_name"],
+            row["search_item_path"],
+            row["commit_sha"],
+        )
+    )
+
+    with report_path.open("w", encoding="utf-8") as handle:
+        for row in normalized_rows:
+            handle.write(json.dumps(row, ensure_ascii=True, sort_keys=True))
+            handle.write("\n")
+    return report_path
+
+
+def summarize_d0_results(rows):
+    """Return pass/drop counts for D0 exact diff evidence results."""
+    summary = {
+        "total": 0,
+        "pass": 0,
+        "drop": 0,
+        "exact_path_match_count": 0,
+        "patch_available_count": 0,
+        "review_evidence_count": 0,
+        "reason_counts": {},
+    }
+    for row in rows:
+        item = dict(row)
+        passed = bool(item["passed"])
+        summary["total"] += 1
+        summary["pass" if passed else "drop"] += 1
+        if item.get("exact_path_match"):
+            summary["exact_path_match_count"] += 1
+        if item.get("patch_available"):
+            summary["patch_available_count"] += 1
+        summary["review_evidence_count"] += len(_json_list_field(item, "review_evidence"))
+        for reason_code in _json_list_field(item, "reason_codes"):
+            summary["reason_counts"][reason_code] = summary["reason_counts"].get(reason_code, 0) + 1
+
+    summary["reason_counts"] = dict(sorted(summary["reason_counts"].items()))
     return summary
 
 
