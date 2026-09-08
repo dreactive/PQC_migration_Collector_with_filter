@@ -1,4 +1,5 @@
 import hashlib
+import json
 from pathlib import Path
 
 
@@ -86,3 +87,51 @@ def file_key(repository_id, path, blob_sha):
 def diff_file_key(repository_id, commit_sha, path):
     """Return the stable dedupe key for one exact changed file patch."""
     return f"github_diff_file:{int(repository_id)}:{str(commit_sha)}:{normalize_path(path)}"
+
+
+def _row_value(row, *names):
+    for name in names:
+        if isinstance(row, dict) and name in row:
+            return row.get(name)
+        if hasattr(row, "keys") and name in row.keys():
+            return row[name]
+    return None
+
+
+def candidate_key_components(row):
+    """Return stable export candidate identity components from an F2/export row."""
+    repository = _row_value(row, "repository") or {}
+    source = _row_value(row, "source") or {}
+    repository_id = _row_value(row, "repository_id") or repository.get("id")
+    repository_full_name = (
+        _row_value(row, "repository_full_name")
+        or repository.get("full_name")
+        or repository.get("name")
+    )
+    commit_sha = _row_value(row, "commit_sha") or source.get("commit_sha")
+    pr_number = _row_value(row, "pr_number") or source.get("pr_number")
+    primary_path = (
+        _row_value(row, "matched_changed_path", "search_item_path", "path")
+        or source.get("primary_path")
+    )
+    return {
+        "provider": "github",
+        "repository_id": int(repository_id) if repository_id is not None else None,
+        "repository_full_name": repository_full_name,
+        "commit_sha": str(commit_sha) if commit_sha else None,
+        "pr_number": int(pr_number) if pr_number is not None else None,
+        "primary_path": normalize_path(primary_path or ""),
+    }
+
+
+def candidate_key(components):
+    """Return a stable dedupe key for one export candidate."""
+    normalized = {
+        key: value
+        for key, value in dict(components).items()
+        if value not in (None, "")
+    }
+    if normalized.get("repository_id") is not None:
+        normalized.pop("repository_full_name", None)
+    key_material = json.dumps(normalized, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return f"candidate:{hashlib.sha256(key_material.encode('utf-8')).hexdigest()}"
