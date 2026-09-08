@@ -7,7 +7,7 @@ will be added here one minimum feature at a time.
 import re
 from datetime import datetime, timezone
 
-from pqc_collector.core import diff_file_key, normalize_path
+from pqc_collector.core import candidate_key, candidate_key_components, diff_file_key, normalize_path
 
 
 DROP_SOURCE_KINDS = {
@@ -1703,6 +1703,86 @@ def is_export_eligible(f2_result, include_pqc_addition_only=False):
     if label not in allowed_labels:
         return False
     return bool(_export_review_evidence(f2_result))
+
+
+def _export_dict(row, key):
+    value = _diff_row_value(row, key, default={})
+    return value if isinstance(value, dict) else {}
+
+
+def _export_list(row, key):
+    value = _diff_row_value(row, key, default=[])
+    return value if isinstance(value, list) else []
+
+
+def _export_repository(row):
+    repository = _export_dict(row, "repository")
+    return {
+        "id": _diff_row_value(row, "repository_id") or repository.get("id"),
+        "full_name": (
+            _diff_row_value(row, "repository_full_name")
+            or repository.get("full_name")
+        ),
+        "html_url": _diff_row_value(row, "repository_url") or repository.get("html_url"),
+    }
+
+
+def _export_source(row):
+    source = _export_dict(row, "source")
+    changed_path = _diff_row_value(row, "matched_changed_path") or source.get("primary_path")
+    changed_paths = _export_list(row, "changed_files") or source.get("changed_paths") or []
+    if changed_path and changed_path not in changed_paths:
+        changed_paths = [changed_path, *changed_paths]
+    return {
+        "commit_sha": _diff_row_value(row, "commit_sha") or source.get("commit_sha"),
+        "commit_url": _diff_row_value(row, "commit_url") or source.get("commit_url"),
+        "pr_number": _diff_row_value(row, "pr_number") or source.get("pr_number"),
+        "pr_url": _diff_row_value(row, "pr_url") or source.get("pr_url"),
+        "primary_path": normalize_path(changed_path or ""),
+        "changed_paths": [normalize_path(path) for path in changed_paths],
+        "raw_commit_path": _diff_row_value(row, "raw_commit_path") or source.get("raw_commit_path"),
+        "patch_path": _diff_row_value(row, "patch_path") or source.get("patch_path"),
+    }
+
+
+def _source_batch_ids(row, batch_id):
+    batch_ids = _export_list(row, "source_batch_ids")
+    if batch_id and batch_id not in batch_ids:
+        batch_ids.append(batch_id)
+    return _unique_values(batch_ids)
+
+
+def build_export_row(candidate_row, include_pqc_addition_only=False, exported_at=None):
+    """Build one export row from an eligible F2 result/report row."""
+    if not is_export_eligible(candidate_row, include_pqc_addition_only):
+        raise ValueError("F2 result is not export eligible")
+
+    batch_id = _diff_row_value(candidate_row, "batch_id")
+    components = candidate_key_components(candidate_row)
+    review_evidence = _export_review_evidence(candidate_row)
+    timestamp = exported_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return {
+        "candidate_key": candidate_key(components),
+        "candidate_key_components": components,
+        "batch_id": batch_id,
+        "first_exported_batch_id": _diff_row_value(
+            candidate_row,
+            "first_exported_batch_id",
+        )
+        or batch_id,
+        "last_updated_batch_id": batch_id,
+        "source_batch_ids": _source_batch_ids(candidate_row, batch_id),
+        "final_label": _export_label(candidate_row),
+        "repository": _export_repository(candidate_row),
+        "source": _export_source(candidate_row),
+        "classification": _export_dict(candidate_row, "classification"),
+        "signals": _export_dict(candidate_row, "signals"),
+        "reason_codes": _export_list(candidate_row, "reason_codes"),
+        "review_evidence": review_evidence,
+        "evidence": review_evidence,
+        "quality": _diff_row_quality(candidate_row),
+        "exported_at": timestamp,
+    }
 
 
 def _changed_file_current_path(changed_file):
