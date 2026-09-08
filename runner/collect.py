@@ -26,6 +26,7 @@ from pqc_collector.filter import (  # noqa: E402
     parse_patch,
 )
 from pqc_collector.pipeline import (  # noqa: E402
+    export_batch,
     fetch_file_batch,
     run_d0_batch,
     run_f0_batch,
@@ -340,6 +341,16 @@ def build_parser():
     )
     report_filters.add_argument("--batch-id", required=True)
     report_filters.add_argument("--sample-limit", default=3, type=int)
+    export = subparsers.add_parser(
+        "export",
+        help="Write batch and cumulative export JSONL files from F2 results.",
+    )
+    export.add_argument("--batch-id", required=True)
+    export.add_argument(
+        "--include-pqc-addition-only",
+        action="store_true",
+        help="Also export pqc_addition_only candidates. Omit for default export labels.",
+    )
     return parser
 
 
@@ -516,6 +527,38 @@ def main(argv=None):
                     "review_samples": review_samples,
                     "review_status": review_status,
                 }
+        finally:
+            conn.close()
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "export":
+        conn = connect(root=PROJECT_ROOT)
+        try:
+            init_db(conn)
+            batch_id = resolve_report_batch_id(conn, args.batch_id)
+            if batch_id is None:
+                result = {
+                    "requested_batch_id": args.batch_id,
+                    "batch_id": None,
+                    "status": "no_f2_results",
+                    "candidate_count": 0,
+                    "exported_count": 0,
+                    "non_exported_count": 0,
+                    "cumulative_export_count": 0,
+                    "report_paths": {},
+                    "summary": {},
+                    "sample_export_row": None,
+                    "sample_non_exported_row": None,
+                }
+            else:
+                result = export_batch(
+                    conn,
+                    batch_id,
+                    include_pqc_addition_only=args.include_pqc_addition_only,
+                    root=PROJECT_ROOT,
+                )
+                result["requested_batch_id"] = args.batch_id
         finally:
             conn.close()
         print(json.dumps(result, indent=2))

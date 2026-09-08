@@ -7,13 +7,16 @@ from pathlib import Path
 
 from pqc_collector.core import file_key
 from pqc_collector.filter import (
+    build_export_row,
     classify_migration,
     find_exact_changed_file,
+    is_export_eligible,
     run_d0_for_item as build_d0_row,
     run_f0_for_item,
     run_f1,
 )
 from pqc_collector.reports import (
+    normalize_f2_report_row,
     summarize_d0_results,
     summarize_f0_results,
     summarize_f1_results,
@@ -32,12 +35,16 @@ from pqc_collector.storage import (
     iter_d0_passed_rows,
     iter_files_for_f1,
     iter_raw_search_items,
+    read_export_candidates,
     read_file_snapshot,
+    rebuild_cumulative_export,
     upsert_diff_evidence,
     upsert_f0_result,
     upsert_f2_result,
     upsert_f1_result,
     upsert_file_snapshot,
+    write_batch_export,
+    write_non_exported_candidates,
     write_raw_patch,
     write_raw_response,
 )
@@ -351,4 +358,128 @@ def run_f2_batch(conn, batch_id, limit=None, root=None, configs=None, checked_at
         "summary": summary,
         "filter_summary": filter_summary,
         "sample_row": f2_rows[0] if f2_rows else None,
+    }
+
+
+def _candidate_raw_evidence_paths(candidate):
+    paths = []
+    for key in ("raw_commit_path", "patch_path"):
+        value = candidate.get(key)
+        if value:
+            paths.append(value)
+    for evidence in candidate.get("review_evidence") or []:
+        for key in ("raw_path", "patch_path"):
+            value = evidence.get(key) if isinstance(evidence, dict) else None
+            if value:
+                paths.append(value)
+    return list(dict.fromkeys(paths))
+
+
+def _missing_raw_evidence_paths(candidate, root=None):
+    base = Path(root).resolve() if root is not None else Path.cwd().resolve()
+    missing = []
+    for raw_path in _candidate_raw_evidence_paths(candidate):
+        path = Path(raw_path)
+        resolved = path if path.is_absolute() else base / path
+        if not resolved.exists():
+            missing.append(str(raw_path))
+    return missing
+
+
+def _export_exclusion_reason_codes(
+    candidate,
+    include_pqc_addition_only=False,
+    missing_raw_paths=None,
+):
+    label = candidate.get("final_label")
+    allowed_labels = {"hybrid_migration", "partial_migration", "full_migration"}
+    if include_pqc_addition_only:
+        allowed_labels.add("pqc_addition_only")
+
+    reason_codes = []
+    if label not in allowed_labels:
+        if label == "pqc_addition_only":
+            reason_codes.append("exclude_pqc_addition_only_requires_option")
+        else:
+            reason_codes.append("exclude_non_export_label")
+    if not candidate.get("review_evidence"):
+        reason_codes.append("exclude_missing_review_evidence")
+    if missing_raw_paths:
+        reason_codes.append("exclude_missing_raw_evidence_path")
+    return reason_codes or ["exclude_not_export_eligible"]
+
+
+def _jsonl_count(path):
+    output_path = Path(path)
+    if not output_path.exists():
+        return 0
+    with output_path.open("r", encoding="utf-8") as handle:
+        return sum(1 for line in handle if line.strip())
+
+
+def export_batch(conn, batch_id, include_pqc_addition_only=False, root=None, exported_at=None):
+    """Write batch and cumulative export JSONL files from stored F2 results."""
+    candidates = read_export_candidates(conn, batch_id)
+    timestamp = exported_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    export_rows = []
+    non_export_rows = []
+
+    for candidate in candidates:
+        missing_raw_paths = _missing_raw_evidence_paths(candidate, root=root)
+        if is_export_eligible(candidate, include_pqc_addition_only) and not missing_raw_paths:
+            export_rows.append(
+                build_export_row(
+                    candidate,
+                    include_pqc_addition_only=include_pqc_addition_only,
+                    exported_at=timestamp,
+                )
+            )
+            continue
+
+        non_export_row = normalize_f2_report_row(batch_id, candidate)
+        non_export_row["export_eligible"] = False
+        non_export_row["export_exclusion_reason_codes"] = _export_exclusion_reason_codes(
+            candidate,
+            include_pqc_addition_only=include_pqc_addition_only,
+            missing_raw_paths=missing_raw_paths,
+        )
+        non_export_row["missing_raw_evidence_paths"] = missing_raw_paths
+        non_export_rows.append(non_export_row)
+
+    export_path = write_batch_export(export_rows, batch_id, root=root)
+    non_exported_path = write_non_exported_candidates(non_export_rows, batch_id, root=root)
+    cumulative_path = rebuild_cumulative_export(
+        conn,
+        root=root,
+        include_pqc_addition_only=include_pqc_addition_only,
+        path_validator=lambda candidate: not _missing_raw_evidence_paths(candidate, root=root),
+    )
+    summary = summarize_filter_results(conn, batch_id)
+    summary["export"] = {
+        "default_export_count": len(export_rows),
+        "non_exported_count": len(non_export_rows),
+        "cumulative_export_count": _jsonl_count(cumulative_path),
+        "include_pqc_addition_only": bool(include_pqc_addition_only),
+    }
+    summary_json_path = write_filter_summary_json(summary, batch_id, root=root)
+    summary_md_path = write_filter_summary_md(summary, batch_id, root=root)
+
+    return {
+        "batch_id": batch_id,
+        "status": "completed",
+        "candidate_count": len(candidates),
+        "exported_count": len(export_rows),
+        "non_exported_count": len(non_export_rows),
+        "cumulative_export_count": summary["export"]["cumulative_export_count"],
+        "include_pqc_addition_only": bool(include_pqc_addition_only),
+        "report_paths": {
+            "export_candidates": str(export_path),
+            "non_exported_candidates": str(non_exported_path),
+            "cumulative_export": str(cumulative_path),
+            "filter_summary_json": str(summary_json_path),
+            "filter_summary_md": str(summary_md_path),
+        },
+        "summary": summary,
+        "sample_export_row": export_rows[0] if export_rows else None,
+        "sample_non_exported_row": non_export_rows[0] if non_export_rows else None,
     }

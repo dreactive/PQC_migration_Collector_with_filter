@@ -1517,13 +1517,20 @@ def _merge_export_row(existing, new_row):
     return merged
 
 
-def rebuild_cumulative_export(conn, root=None, include_pqc_addition_only=False):
+def rebuild_cumulative_export(
+    conn,
+    root=None,
+    include_pqc_addition_only=False,
+    path_validator=None,
+):
     """Rebuild the cumulative export JSONL without blind append."""
     from pqc_collector.filter import build_export_row, is_export_eligible
 
     export_rows_by_key = {}
     for candidate in read_export_candidates(conn):
         if not is_export_eligible(candidate, include_pqc_addition_only):
+            continue
+        if path_validator is not None and not path_validator(candidate):
             continue
         export_row = build_export_row(
             candidate,
