@@ -5,7 +5,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from pqc_collector.core import query_page_key
+from pqc_collector.core import normalize_path, query_page_key
 from pqc_collector.reports import (
     write_dedupe_summary_report,
     write_one_page_collection_reports,
@@ -96,6 +96,18 @@ class GitHubClient:
     def get_file(self, file_url):
         """Fetch one GitHub contents API file response by its API URL."""
         return self.get_json(file_url)
+
+    def list_commits_for_path(self, repo, path, page=1, per_page=30):
+        """Fetch one commit list page for a repository path."""
+        full_name = repo.get("full_name") if isinstance(repo, dict) else str(repo)
+        return self.get_json(
+            f"/repos/{full_name}/commits",
+            {
+                "path": normalize_path(path),
+                "page": int(page),
+                "per_page": int(per_page),
+            },
+        )
 
 
 def _resource_snapshot(resources, name):
