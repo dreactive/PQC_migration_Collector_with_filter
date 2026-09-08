@@ -81,3 +81,8 @@ def search_item_key(repository_id, path, blob_sha):
 def file_key(repository_id, path, blob_sha):
     """Return the stable dedupe key for one fetched GitHub file snapshot."""
     return f"github_file:{int(repository_id)}:{normalize_path(path)}:{str(blob_sha)}"
+
+
+def diff_file_key(repository_id, commit_sha, path):
+    """Return the stable dedupe key for one exact changed file patch."""
+    return f"github_diff_file:{int(repository_id)}:{str(commit_sha)}:{normalize_path(path)}"
