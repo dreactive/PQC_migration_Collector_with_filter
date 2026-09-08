@@ -4,6 +4,7 @@ This module intentionally starts without pipeline logic. F0/F1/D0/F2 functions
 will be added here one minimum feature at a time.
 """
 
+import re
 from datetime import datetime, timezone
 
 from pqc_collector.core import normalize_path
@@ -496,6 +497,118 @@ def run_f1(file_row, f0_result=None, configs=None, checked_at=None):
         "raw_file_path": raw_file_path,
         "checked_at": timestamp,
     }
+
+
+HUNK_HEADER_RE = re.compile(
+    r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? "
+    r"\+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@(?P<section>.*)$"
+)
+
+
+def _parse_hunk_header(header):
+    match = HUNK_HEADER_RE.match(header)
+    if not match:
+        return None
+    return {
+        "old_start": int(match.group("old_start")),
+        "old_count": int(match.group("old_count") or 1),
+        "new_start": int(match.group("new_start")),
+        "new_count": int(match.group("new_count") or 1),
+        "section": match.group("section").strip(),
+    }
+
+
+def parse_patch(patch_text):
+    """Parse unified diff text into hunks with old/new file line numbers."""
+    hunks = []
+    current = None
+    old_line = None
+    new_line = None
+
+    for patch_line_no, raw_line in enumerate(str(patch_text or "").splitlines(), start=1):
+        header = _parse_hunk_header(raw_line)
+        if header is not None:
+            current = {
+                "hunk_index": len(hunks) + 1,
+                "header": raw_line,
+                **header,
+                "lines": [],
+            }
+            hunks.append(current)
+            old_line = header["old_start"]
+            new_line = header["new_start"]
+            continue
+
+        if current is None:
+            continue
+
+        if raw_line.startswith("\\ No newline at end of file"):
+            current["lines"].append(
+                {
+                    "kind": "metadata",
+                    "patch_line_no": patch_line_no,
+                    "old_file_line": None,
+                    "new_file_line": None,
+                    "content": raw_line,
+                    "raw_line": raw_line,
+                    "context": raw_line,
+                }
+            )
+            continue
+
+        prefix = raw_line[:1]
+        content = raw_line[1:] if prefix in {" ", "+", "-"} else raw_line
+        if prefix == "+":
+            line = {
+                "kind": "added",
+                "old_file_line": None,
+                "new_file_line": new_line,
+            }
+            new_line += 1
+        elif prefix == "-":
+            line = {
+                "kind": "removed",
+                "old_file_line": old_line,
+                "new_file_line": None,
+            }
+            old_line += 1
+        else:
+            line = {
+                "kind": "context",
+                "old_file_line": old_line,
+                "new_file_line": new_line,
+            }
+            old_line += 1
+            new_line += 1
+
+        line.update(
+            {
+                "patch_line_no": patch_line_no,
+                "content": content,
+                "raw_line": raw_line,
+                "context": raw_line,
+            }
+        )
+        current["lines"].append(line)
+
+    return hunks
+
+
+def iter_patch_lines(hunks):
+    """Yield parsed patch lines from parsed hunks in file order."""
+    for hunk in hunks or []:
+        for line in hunk.get("lines", []):
+            yield {**line, "hunk_index": hunk.get("hunk_index"), "hunk_header": hunk.get("header")}
+
+
+def extract_added_lines(hunks):
+    """Return parsed added lines from parsed hunks."""
+    return [line for line in iter_patch_lines(hunks) if line.get("kind") == "added"]
+
+
+def extract_removed_lines(hunks):
+    """Return parsed removed lines from parsed hunks."""
+    return [line for line in iter_patch_lines(hunks) if line.get("kind") == "removed"]
 
 
 def is_documentation_path(path):

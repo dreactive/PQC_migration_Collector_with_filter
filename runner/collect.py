@@ -19,6 +19,12 @@ from pqc_collector.collect import (  # noqa: E402
     fetch_search_page_raw,
     make_query,
 )
+from pqc_collector.filter import (  # noqa: E402
+    extract_added_lines,
+    extract_removed_lines,
+    iter_patch_lines,
+    parse_patch,
+)
 from pqc_collector.pipeline import fetch_file_batch, run_f0_batch, run_f1_batch  # noqa: E402
 from pqc_collector.reports import (  # noqa: E402
     report_schemas,
@@ -291,6 +297,11 @@ def build_parser():
     )
     run_f1.add_argument("--batch-id", required=True)
     run_f1.add_argument("--limit", default=None, type=int)
+    inspect_patch = subparsers.add_parser(
+        "inspect-patch",
+        help="Parse one unified diff patch file and print a compact JSON preview.",
+    )
+    inspect_patch.add_argument("--patch-path", required=True, type=Path)
     return parser
 
 
@@ -395,6 +406,25 @@ def main(argv=None):
             result = run_f1_batch(conn, args.batch_id, args.limit, PROJECT_ROOT)
         finally:
             conn.close()
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "inspect-patch":
+        patch_text = args.patch_path.read_text(encoding="utf-8")
+        hunks = parse_patch(patch_text)
+        lines = list(iter_patch_lines(hunks))
+        added_lines = extract_added_lines(hunks)
+        removed_lines = extract_removed_lines(hunks)
+        result = {
+            "patch_path": str(args.patch_path),
+            "hunk_count": len(hunks),
+            "line_count": len(lines),
+            "added_line_count": len(added_lines),
+            "removed_line_count": len(removed_lines),
+            "sample_hunk": hunks[0] if hunks else None,
+            "added_lines_preview": added_lines[:5],
+            "removed_lines_preview": removed_lines[:5],
+        }
         print(json.dumps(result, indent=2))
         return 0
 
