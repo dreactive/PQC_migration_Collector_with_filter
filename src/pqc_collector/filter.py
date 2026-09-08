@@ -645,6 +645,9 @@ def build_line_evidence(patch_lines, matches):
         line_kind = line.get("kind")
         line_text = line.get("content") or line.get("context") or ""
         for match in matches or []:
+            line_numbers = match.get("line_numbers")
+            if line_numbers and line.get("patch_line_no") not in line_numbers:
+                continue
             allowed_kinds = _match_kinds(match)
             if allowed_kinds and line_kind not in allowed_kinds:
                 continue
@@ -682,6 +685,93 @@ def build_line_evidence(patch_lines, matches):
             )
             counter += 1
     return evidence_rows
+
+
+def _line_hunk_text(line, patch_lines):
+    hunk_index = line.get("hunk_index")
+    return "\n".join(
+        other.get("content") or ""
+        for other in patch_lines
+        if other.get("hunk_index") == hunk_index
+    )
+
+
+def _pqc_added_matches(patch_lines, config=None):
+    direct_rules, near_rules = _strong_pqc_rules(config)
+    matches = []
+    seen = set()
+    for line in patch_lines:
+        if line.get("kind") != "added":
+            continue
+        line_text = line.get("content") or ""
+        hunk_text = _line_hunk_text(line, patch_lines)
+
+        for signal, signal_type in direct_rules.items():
+            if not _contains_signal(line_text, signal):
+                continue
+            key = (line.get("patch_line_no"), signal, signal_type, None)
+            if key in seen:
+                continue
+            seen.add(key)
+            matches.append(
+                {
+                    "line_kinds": ["added"],
+                    "line_numbers": [line.get("patch_line_no")],
+                    "supports": ["pqc_added_in_diff"],
+                    "kind": "patch_added_line",
+                    "signal": signal,
+                    "signal_type": signal_type,
+                    "terms": [signal],
+                    "source_field": "patch",
+                }
+            )
+
+        for rule in near_rules:
+            signal = rule["signal"]
+            if not _contains_signal(line_text, signal):
+                continue
+            near_terms = [
+                near for near in rule.get("near", []) if _contains_signal(hunk_text, near)
+            ]
+            if not near_terms:
+                continue
+            near = sorted(near_terms, key=len, reverse=True)[0]
+            signal_type = rule.get("signal_type", "pqc_api")
+            key = (line.get("patch_line_no"), signal, signal_type, near)
+            if key in seen:
+                continue
+            seen.add(key)
+            matches.append(
+                {
+                    "line_kinds": ["added"],
+                    "line_numbers": [line.get("patch_line_no")],
+                    "supports": ["pqc_added_in_diff"],
+                    "kind": "patch_added_line",
+                    "signal": signal,
+                    "signal_type": signal_type,
+                    "near": near,
+                    "terms": [signal, near],
+                    "source_field": "patch",
+                }
+            )
+    return matches
+
+
+def detect_pqc_added(parsed_patch, config=None):
+    """Detect strong PQC additions from added patch lines only."""
+    patch_lines = list(iter_patch_lines(parsed_patch))
+    matches = _pqc_added_matches(patch_lines, config)
+    evidence = build_line_evidence(patch_lines, matches)
+    matched_terms = []
+    for row in evidence:
+        matched_terms.extend(row.get("matched_terms", []))
+    pqc_added = bool(evidence)
+    return {
+        "pqc_added": pqc_added,
+        "matched_terms": _unique_values(matched_terms),
+        "review_evidence": evidence,
+        "reason_codes": ["pqc_added_in_diff"] if pqc_added else ["drop_no_pqc_added_in_diff"],
+    }
 
 
 def _changed_file_current_path(changed_file):
