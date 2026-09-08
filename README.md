@@ -69,7 +69,7 @@ build-viewer
 bash scripts/run_async_pipeline.sh
 ```
 
-기본값은 OpenSSL C 쿼리 1페이지, stage limit 50이다.
+기본값은 설정 파일의 모든 쿼리, 각 쿼리 1페이지부터 10페이지, page size 100, stage limit 1000이다.
 
 실행 전 흐름만 확인하려면:
 
@@ -84,15 +84,15 @@ Remove-Item Env:\RUN_ID
 주요 조절값:
 
 ```powershell
-$env:QUERY_GROUP="openssl_pqc_api"
-$env:QUERY_KEY="openssl_evp_mlkem_ctx"
+$env:QUERY_GROUP=""
+$env:QUERY_KEY=""
 $env:START_PAGE="1"
-$env:MAX_PAGES_PER_QUERY="1"
-$env:STAGE_LIMIT="50"
+$env:MAX_PAGES_PER_QUERY="10"
+$env:STAGE_LIMIT="1000"
 bash scripts/run_async_pipeline.sh
 ```
 
-여러 페이지를 이어서 수집하려면 `MAX_PAGES_PER_QUERY`를 늘린다.
+특정 쿼리만 수집하려면 `QUERY_GROUP`과 `QUERY_KEY`를 지정한다. 여러 페이지를 이어서 수집하려면 `MAX_PAGES_PER_QUERY`를 늘린다.
 
 ## 지원 언어 제한
 

@@ -12,11 +12,12 @@ cd "$ROOT_DIR"
 
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 BATCH_PREFIX="${BATCH_PREFIX:-live}"
-QUERY_GROUP="${QUERY_GROUP:-openssl_pqc_api}"
-QUERY_KEY="${QUERY_KEY:-openssl_evp_mlkem_ctx}"
+QUERY_GROUP="${QUERY_GROUP:-}"
+QUERY_KEY="${QUERY_KEY:-}"
 START_PAGE="${START_PAGE:-1}"
-MAX_PAGES_PER_QUERY="${MAX_PAGES_PER_QUERY:-1}"
-STAGE_LIMIT="${STAGE_LIMIT:-50}"
+MAX_PAGES_PER_QUERY="${MAX_PAGES_PER_QUERY:-10}"
+STAGE_LIMIT="${STAGE_LIMIT:-1000}"
+COLLECT_THROTTLE_SECONDS="${COLLECT_THROTTLE_SECONDS:-3}"
 RETRY_COUNT="${RETRY_COUNT:-3}"
 RETRY_SLEEP_SECONDS="${RETRY_SLEEP_SECONDS:-10}"
 POLL_SECONDS="${POLL_SECONDS:-2}"
@@ -254,6 +255,9 @@ collector_worker() {
         --page "$page" \
         --page-size "$page_size"; then
         queue_put f0 "$batch_id"
+      fi
+      if [[ "$COLLECT_THROTTLE_SECONDS" != "0" ]]; then
+        sleep "$COLLECT_THROTTLE_SECONDS"
       fi
     done
   done

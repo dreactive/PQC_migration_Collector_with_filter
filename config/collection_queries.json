@@ -4,38 +4,38 @@
       {
         "query_key": "openssl_evp_mlkem_ctx",
         "query_text": "\"EVP_PKEY_CTX_new_from_name\" \"ML-KEM\" language:C",
-        "page_size": 50
+        "page_size": 100
       },
       {
         "query_key": "openssl_oqsprovider_load",
         "query_text": "\"OSSL_PROVIDER_load\" \"oqsprovider\" language:C",
-        "page_size": 50
+        "page_size": 100
       }
     ],
     "wolfssl_pqc_api": [
       {
         "query_key": "wolfssl_mlkem_c",
         "query_text": "\"wc_MlKemKey\" language:C",
-        "page_size": 50
+        "page_size": 100
       }
     ],
     "jce_pqc_api": [
       {
         "query_key": "jce_mlkem_java",
         "query_text": "\"KeyPairGenerator.getInstance\" \"ML-KEM\" language:Java",
-        "page_size": 50
+        "page_size": 100
       }
     ],
     "bouncycastle_pqc_api": [
       {
         "query_key": "bouncycastle_mlkem_java",
         "query_text": "\"MLKEMParameterSpec\" \"org.bouncycastle\" language:Java",
-        "page_size": 50
+        "page_size": 100
       },
       {
         "query_key": "bouncycastle_mlkem_csharp",
         "query_text": "\"Org.BouncyCastle\" \"MLKEM\" language:C#",
-        "page_size": 50
+        "page_size": 100
       }
     ]
   }
