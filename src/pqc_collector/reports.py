@@ -901,6 +901,100 @@ def summarize_f2_results(rows):
     return summary
 
 
+def _batch_rows(conn, table, batch_id):
+    return conn.execute(
+        f"SELECT * FROM {table} WHERE batch_id = ?",
+        (batch_id,),
+    ).fetchall()
+
+
+def summarize_filter_results(conn, batch_id):
+    """Return the combined F0/F1/D0/F2 filter summary for one batch."""
+    f0_rows = _batch_rows(conn, "f0_results", batch_id)
+    f1_rows = _batch_rows(conn, "f1_results", batch_id)
+    d0_rows = _batch_rows(conn, "d0_results", batch_id)
+    f2_rows = _batch_rows(conn, "f2_results", batch_id)
+    return {
+        "batch_id": batch_id,
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "f0": summarize_f0_results(f0_rows),
+        "f1": summarize_f1_results(f1_rows),
+        "d0": summarize_d0_results(d0_rows),
+        "f2": summarize_f2_results(f2_rows),
+        "export": {
+            "default_export_count": 0,
+            "non_exported_count": 0,
+            "cumulative_export_count": 0,
+        },
+    }
+
+
+def write_filter_summary_json(summary, batch_id, output_path=None, root=None):
+    """Write combined filter summary JSON for one batch."""
+    report_path = output_path or report_paths(batch_id, root)["filter"]["filter_summary_json"]
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    row = dict(summary)
+    row.setdefault("batch_id", batch_id)
+    row.setdefault(
+        "generated_at",
+        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    )
+    row.setdefault("f0", {})
+    row.setdefault("f1", {})
+    row.setdefault("d0", {})
+    row.setdefault("f2", {})
+    row.setdefault("export", {})
+    with report_path.open("w", encoding="utf-8") as handle:
+        json.dump(row, handle, ensure_ascii=True, indent=2, sort_keys=True)
+        handle.write("\n")
+    return report_path
+
+
+def _summary_count_lines(prefix, mapping):
+    if not mapping:
+        return [f"- `{prefix}`: {{}}"]
+    return [f"- `{prefix}.{key}`: {value}" for key, value in sorted(mapping.items())]
+
+
+def write_filter_summary_md(summary, batch_id, output_path=None, root=None):
+    """Write a human-readable combined filter summary for one batch."""
+    report_path = output_path or report_paths(batch_id, root)["filter"]["filter_summary_md"]
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    row = dict(summary)
+    row.setdefault("batch_id", batch_id)
+    row.setdefault(
+        "generated_at",
+        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    )
+    lines = [
+        "# Filter Summary",
+        "",
+        f"- `batch_id`: {row['batch_id']}",
+        f"- `generated_at`: {row['generated_at']}",
+        "",
+    ]
+    for stage in ("f0", "f1", "d0", "f2", "export"):
+        data = row.get(stage, {})
+        lines.append(f"## {stage.upper()}")
+        if stage == "f2":
+            lines.extend(_summary_count_lines("label_counts", data.get("label_counts", {})))
+            lines.extend(_summary_count_lines("reason_counts", data.get("reason_counts", {})))
+            lines.append(f"- `review_evidence_count`: {data.get('review_evidence_count', 0)}")
+            lines.append(
+                f"- `rows_without_review_evidence`: {data.get('rows_without_review_evidence', 0)}"
+            )
+        elif stage == "export":
+            lines.extend(f"- `{key}`: {value}" for key, value in sorted(data.items()))
+        else:
+            lines.append(f"- `total`: {data.get('total', 0)}")
+            lines.append(f"- `pass`: {data.get('pass', 0)}")
+            lines.append(f"- `drop`: {data.get('drop', 0)}")
+            lines.extend(_summary_count_lines("reason_counts", data.get("reason_counts", {})))
+        lines.append("")
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    return report_path
+
+
 def write_dedupe_summary_report(
     conn,
     batch_id,

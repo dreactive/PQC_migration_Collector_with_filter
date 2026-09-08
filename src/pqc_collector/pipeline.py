@@ -18,10 +18,13 @@ from pqc_collector.reports import (
     summarize_f0_results,
     summarize_f1_results,
     summarize_f2_results,
+    summarize_filter_results,
     write_d0_report,
     write_f0_report,
     write_f1_report,
     write_f2_report,
+    write_filter_summary_json,
+    write_filter_summary_md,
 )
 from pqc_collector.storage import (
     iter_f0_passed_items,
@@ -330,6 +333,9 @@ def run_f2_batch(conn, batch_id, limit=None, root=None, configs=None, checked_at
 
     report_path = write_f2_report(f2_rows, batch_id, root=root)
     summary = summarize_f2_results(f2_rows)
+    filter_summary = summarize_filter_results(conn, batch_id)
+    filter_summary_json_path = write_filter_summary_json(filter_summary, batch_id, root=root)
+    filter_summary_md_path = write_filter_summary_md(filter_summary, batch_id, root=root)
     return {
         "batch_id": batch_id,
         "status": "completed",
@@ -339,7 +345,10 @@ def run_f2_batch(conn, batch_id, limit=None, root=None, configs=None, checked_at
         "updated_result_count": updated_result_count,
         "report_paths": {
             "filter_f2_migration_classifier": str(report_path),
+            "filter_summary_json": str(filter_summary_json_path),
+            "filter_summary_md": str(filter_summary_md_path),
         },
         "summary": summary,
+        "filter_summary": filter_summary,
         "sample_row": f2_rows[0] if f2_rows else None,
     }
