@@ -32,6 +32,7 @@ from pqc_collector.pipeline import (  # noqa: E402
     run_f1_batch,
 )
 from pqc_collector.reports import (  # noqa: E402
+    build_filter_review_status,
     report_schemas,
     select_review_samples,
     summarize_filter_results,
@@ -502,6 +503,7 @@ def main(argv=None):
                     batch_id,
                     limit_per_label=args.sample_limit,
                 )
+                review_status = build_filter_review_status(summary, review_samples)
                 result = {
                     "requested_batch_id": args.batch_id,
                     "batch_id": batch_id,
@@ -512,6 +514,7 @@ def main(argv=None):
                     },
                     "summary": summary,
                     "review_samples": review_samples,
+                    "review_status": review_status,
                 }
         finally:
             conn.close()

@@ -1180,6 +1180,74 @@ def select_review_samples(conn, batch_id, limit_per_label=3, export_labels=None)
     }
 
 
+def build_filter_review_status(summary, review_samples):
+    """Return Phase 9 review gate status and next recommendations."""
+    f2_summary = summary.get("f2", {}) if isinstance(summary, dict) else {}
+    checks = review_samples.get("checks", {}) if isinstance(review_samples, dict) else {}
+    blocker_fields = (
+        "export_candidates_without_review_evidence",
+        "export_candidates_with_drop_source_kind",
+        "export_candidates_without_patch_path",
+        "export_candidates_without_d0_pass",
+    )
+    blockers = {
+        field: checks.get(field, [])
+        for field in blocker_fields
+        if checks.get(field)
+    }
+    f2_total = int(f2_summary.get("total", 0) or 0)
+    export_candidate_count = int(review_samples.get("export_candidate_count", 0) or 0)
+
+    if f2_total == 0:
+        status = "needs_f2_results"
+        ready_for_export = False
+        recommendations = [
+            "run-f2 결과를 만든 뒤 report-filters를 다시 실행한다.",
+            "D0 pass 결과가 비어 있으면 run-d0 단계의 exact diff evidence를 먼저 확인한다.",
+        ]
+    elif blockers:
+        status = "needs_manual_review"
+        ready_for_export = False
+        recommendations = [
+            "checks에 표시된 candidate_evidence_key의 F2 report row를 먼저 검토한다.",
+            "review_evidence, source.patch_path, quality.source_kind, D0 pass 연결을 보강한 뒤 report-filters를 다시 실행한다.",
+        ]
+    elif export_candidate_count == 0:
+        status = "no_export_candidates"
+        ready_for_export = False
+        recommendations = [
+            "non_export_candidate_samples의 reason_codes를 보고 필터가 과하게 보수적인지 확인한다.",
+            "추가 수집 또는 F2 signal rule 보강 후 report-filters를 다시 실행한다.",
+        ]
+    else:
+        status = "ready_for_export_phase"
+        ready_for_export = True
+        recommendations = [
+            "export 구현으로 넘어가기 전에 export_candidate_samples의 raw patch와 evidence line을 눈으로 확인한다.",
+            "다음 요청에서 Phase 10 export 기능 구현을 시작한다.",
+        ]
+
+    return {
+        "status": status,
+        "ready_for_export_phase": ready_for_export,
+        "checked_items": {
+            "f0_reason_distribution_available": bool(summary.get("f0")),
+            "f1_reason_distribution_available": bool(summary.get("f1")),
+            "d0_pass_drop_distribution_available": bool(summary.get("d0")),
+            "f2_label_distribution_available": bool(f2_summary.get("label_counts")),
+            "export_candidate_samples_available": bool(
+                review_samples.get("export_candidate_samples")
+            ),
+            "non_export_candidate_samples_available": bool(
+                review_samples.get("non_export_candidate_samples")
+            ),
+            "export_candidate_quality_checks_available": bool(checks),
+        },
+        "blockers": blockers,
+        "next_recommendations": recommendations,
+    }
+
+
 def write_dedupe_summary_report(
     conn,
     batch_id,
