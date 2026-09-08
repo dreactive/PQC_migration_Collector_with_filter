@@ -1464,3 +1464,76 @@ def upsert_f2_result(conn, batch_id, row):
 
     values["status"] = status
     return values
+
+
+def _json_column(row, key, default):
+    value = row.get(key)
+    if value not in (None, ""):
+        return value
+    json_value = row.get(f"{key}_json")
+    return json.loads(json_value) if json_value else default
+
+
+def _f2_export_candidate_row(row):
+    item = dict(row)
+    item["changed_files"] = _json_column(item, "changed_files", [])
+    item["classification"] = _json_column(item, "classification", {})
+    item["signals"] = _json_column(item, "signals", {})
+    item["review_evidence"] = _json_column(item, "review_evidence", [])
+    item["quality"] = _json_column(item, "quality", {})
+    item["reason_codes"] = _json_column(item, "reason_codes", [])
+    return item
+
+
+def read_export_candidates(conn, batch_id=None):
+    """Return stored F2 rows as export-candidate input rows."""
+    params = []
+    batch_filter = ""
+    if batch_id is not None:
+        batch_filter = "WHERE batch_id = ?"
+        params.append(batch_id)
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM f2_results
+        {batch_filter}
+        ORDER BY checked_at, batch_id, repository_full_name, matched_changed_path, commit_sha
+        """,
+        tuple(params),
+    ).fetchall()
+    return [_f2_export_candidate_row(row) for row in rows]
+
+
+def _merge_export_row(existing, new_row):
+    source_batch_ids = []
+    for row in (existing, new_row):
+        for batch_id in row.get("source_batch_ids", []):
+            if batch_id not in source_batch_ids:
+                source_batch_ids.append(batch_id)
+    first_batch = existing.get("first_exported_batch_id") or new_row.get("first_exported_batch_id")
+    merged = dict(new_row)
+    merged["first_exported_batch_id"] = first_batch
+    merged["source_batch_ids"] = source_batch_ids
+    return merged
+
+
+def rebuild_cumulative_export(conn, root=None, include_pqc_addition_only=False):
+    """Rebuild the cumulative export JSONL without blind append."""
+    from pqc_collector.filter import build_export_row, is_export_eligible
+
+    export_rows_by_key = {}
+    for candidate in read_export_candidates(conn):
+        if not is_export_eligible(candidate, include_pqc_addition_only):
+            continue
+        export_row = build_export_row(
+            candidate,
+            include_pqc_addition_only=include_pqc_addition_only,
+        )
+        key = export_row["candidate_key"]
+        if key in export_rows_by_key:
+            export_rows_by_key[key] = _merge_export_row(export_rows_by_key[key], export_row)
+        else:
+            export_rows_by_key[key] = export_row
+
+    output_path = project_paths(root)["exports"] / "migration_candidates.jsonl"
+    return _write_jsonl_rows(export_rows_by_key.values(), output_path)
