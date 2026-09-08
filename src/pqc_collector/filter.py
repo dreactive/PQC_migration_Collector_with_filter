@@ -1142,6 +1142,65 @@ def detect_migration_context(parsed_patch, message=None, path=None, config=None)
     }
 
 
+def _patch_evidence_rows(result, kind):
+    return [
+        row
+        for row in result.get("review_evidence", [])
+        if row.get("kind") == kind and row.get("patch_hunk_header")
+    ]
+
+
+def _replacement_strength(pqc_rows, legacy_rows):
+    pqc_hunks = {row.get("patch_hunk_header") for row in pqc_rows}
+    legacy_hunks = {row.get("patch_hunk_header") for row in legacy_rows}
+    if pqc_hunks.intersection(legacy_hunks):
+        return "same_hunk"
+    if pqc_rows and legacy_rows:
+        return "same_file"
+    return None
+
+
+def _replacement_evidence(rows, reason_code):
+    return [
+        {
+            **row,
+            "supports": _unique_values([*row.get("supports", []), reason_code, "replacement_signal"]),
+        }
+        for row in rows
+    ]
+
+
+def detect_replacement_signal(parsed_patch, pqc_result=None, legacy_result=None, config=None):
+    """Detect internal replacement signal from PQC additions and legacy removals."""
+    pqc = pqc_result or detect_pqc_added(parsed_patch, config)
+    legacy = legacy_result or detect_legacy_removed(parsed_patch, config)
+    pqc_rows = _patch_evidence_rows(pqc, "patch_added_line")
+    legacy_rows = _patch_evidence_rows(legacy, "patch_removed_line")
+    strength = _replacement_strength(pqc_rows, legacy_rows)
+
+    if not strength:
+        return {
+            "replacement_signal": False,
+            "replacement_strength": None,
+            "matched_terms": [],
+            "review_evidence": [],
+            "reason_codes": ["no_replacement_signal"],
+        }
+
+    reason_code = "legacy_removed_same_hunk" if strength == "same_hunk" else "legacy_removed_same_file"
+    evidence = _replacement_evidence([*legacy_rows, *pqc_rows], reason_code)
+    matched_terms = []
+    for row in evidence:
+        matched_terms.extend(row.get("matched_terms", []))
+    return {
+        "replacement_signal": True,
+        "replacement_strength": strength,
+        "matched_terms": _unique_values(matched_terms),
+        "review_evidence": _renumber_evidence(evidence),
+        "reason_codes": [reason_code, "replacement_signal"],
+    }
+
+
 def _changed_file_current_path(changed_file):
     if not isinstance(changed_file, dict):
         return ""
