@@ -227,6 +227,14 @@ DEFAULT_PARTIAL_FEATURE_TERMS = [
     "with_",
     "use_",
 ]
+DEFAULT_FULL_MIGRATION_INTENT_TERMS = [
+    "replace",
+    "remove",
+    "drop",
+    "migrate from",
+    "switch from",
+]
+FULL_MIGRATION_SOURCE_KINDS = {"application_code", "config_code"}
 
 
 def _path_parts(path):
@@ -1315,6 +1323,153 @@ def detect_partial_scope_signal(parsed_patch, message=None, path=None, config=No
         "reason_codes": _unique_values(reason_codes)
         if partial_scope
         else ["no_partial_scope_signal"],
+    }
+
+
+def _full_migration_intent_terms(config=None):
+    if not config:
+        return DEFAULT_FULL_MIGRATION_INTENT_TERMS
+    return list(config.get("full_migration_intent_terms", DEFAULT_FULL_MIGRATION_INTENT_TERMS))
+
+
+def _legacy_remaining_evidence(parsed_patch, config=None):
+    patch_lines = list(iter_patch_lines(parsed_patch))
+    legacy_terms = list(_legacy_removed_signals(config).keys())
+    matches = []
+    for line in patch_lines:
+        if line.get("kind") not in {"added", "context"}:
+            continue
+        matched_terms = _line_match(line, legacy_terms)
+        if not matched_terms:
+            continue
+        matches.append(
+            {
+                "line_kinds": [line.get("kind")],
+                "line_numbers": [line.get("patch_line_no")],
+                "supports": ["legacy_remaining_in_changed_scope"],
+                "kind": f"patch_{line.get('kind')}_line",
+                "signal": matched_terms[0],
+                "signal_type": "legacy_remaining",
+                "terms": matched_terms,
+                "source_field": "patch",
+            }
+        )
+    return build_line_evidence(patch_lines, matches)
+
+
+def _supported_full_source_kind(source_kind):
+    return source_kind in FULL_MIGRATION_SOURCE_KINDS
+
+
+def _source_kind_evidence(source_kind):
+    if not _supported_full_source_kind(source_kind):
+        return []
+    return _text_evidence(
+        "source_kind",
+        "source_kind",
+        "quality",
+        ["full_source_kind"],
+        source_kind,
+        [source_kind],
+    )
+
+
+def detect_full_migration_signal(
+    parsed_patch,
+    message=None,
+    source_kind=None,
+    pqc_result=None,
+    legacy_result=None,
+    replacement_result=None,
+    config=None,
+):
+    """Detect conservative full migration signal within the changed diff scope."""
+    pqc = pqc_result or detect_pqc_added(parsed_patch, config)
+    legacy = legacy_result or detect_legacy_removed(parsed_patch, config)
+    replacement = replacement_result or detect_replacement_signal(
+        parsed_patch,
+        pqc_result=pqc,
+        legacy_result=legacy,
+        config=config,
+    )
+    remaining_evidence = _legacy_remaining_evidence(parsed_patch, config)
+    intent_terms = [
+        term for term in _full_migration_intent_terms(config) if _contains_signal(message or "", term)
+    ]
+
+    evidence = []
+    matched_terms = []
+    reason_codes = []
+    missing_reasons = []
+
+    if pqc.get("pqc_added"):
+        reason_codes.append("pqc_added_in_diff")
+        matched_terms.extend(pqc.get("matched_terms", []))
+    else:
+        missing_reasons.append("missing_pqc_added_in_diff")
+
+    if legacy.get("legacy_removed"):
+        reason_codes.append("legacy_removed_in_diff")
+        matched_terms.extend(legacy.get("matched_terms", []))
+    else:
+        missing_reasons.append("missing_legacy_removed_in_diff")
+
+    if replacement.get("replacement_signal"):
+        reason_codes.extend(replacement.get("reason_codes", []))
+        evidence.extend(replacement.get("review_evidence", []))
+        matched_terms.extend(replacement.get("matched_terms", []))
+    else:
+        missing_reasons.append("missing_replacement_signal")
+
+    if remaining_evidence:
+        missing_reasons.append("legacy_remaining_in_changed_scope")
+        evidence.extend(remaining_evidence)
+        for row in remaining_evidence:
+            matched_terms.extend(row.get("matched_terms", []))
+
+    if intent_terms:
+        reason_codes.append("strong_full_migration_intent")
+        evidence.extend(
+            _text_evidence(
+                "commit_message",
+                "commit_message",
+                "intent",
+                ["strong_full_migration_intent"],
+                message,
+                intent_terms,
+            )
+        )
+        matched_terms.extend(intent_terms)
+    else:
+        missing_reasons.append("missing_full_migration_intent")
+
+    if _supported_full_source_kind(source_kind):
+        reason_codes.append("full_source_kind")
+        evidence.extend(_source_kind_evidence(source_kind))
+        matched_terms.append(source_kind)
+    else:
+        missing_reasons.append("unsupported_source_kind_for_full")
+
+    full_migration = not missing_reasons
+    if full_migration:
+        reason_codes.append("full_within_changed_scope")
+    else:
+        reason_codes.extend(missing_reasons)
+        reason_codes.append("no_full_migration_signal")
+
+    return {
+        "full_migration_signal": full_migration,
+        "matched_terms": _unique_values(matched_terms),
+        "review_evidence": _renumber_evidence(evidence),
+        "reason_codes": _unique_values(reason_codes),
+        "required": {
+            "pqc_added": bool(pqc.get("pqc_added")),
+            "legacy_removed": bool(legacy.get("legacy_removed")),
+            "replacement_signal": bool(replacement.get("replacement_signal")),
+            "no_legacy_remaining_in_changed_scope": not bool(remaining_evidence),
+            "strong_full_migration_intent": bool(intent_terms),
+            "supported_source_kind": _supported_full_source_kind(source_kind),
+        },
     }
 
 
