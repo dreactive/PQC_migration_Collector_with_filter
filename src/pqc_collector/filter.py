@@ -985,12 +985,19 @@ def detect_hybrid_signal(parsed_patch, message=None, config=None):
             )
             continue
 
-        hunk_text = _line_hunk_text(line, patch_lines)
+        added_hunk_text = "\n".join(
+            other.get("content") or ""
+            for other in patch_lines
+            if other.get("hunk_index") == line.get("hunk_index")
+            and other.get("kind") == "added"
+        )
         line_pqc_terms = _line_match(line, pqc_terms)
         line_legacy_terms = _line_match(line, legacy_terms)
-        hunk_has_pqc = line_pqc_terms or any(_contains_signal(hunk_text, term) for term in pqc_terms)
+        hunk_has_pqc = line_pqc_terms or any(
+            _contains_signal(added_hunk_text, term) for term in pqc_terms
+        )
         hunk_has_legacy = line_legacy_terms or any(
-            _contains_signal(hunk_text, term) for term in legacy_terms
+            _contains_signal(added_hunk_text, term) for term in legacy_terms
         )
         line_terms = line_pqc_terms or line_legacy_terms
         if hunk_has_pqc and hunk_has_legacy and line_terms:
@@ -1470,6 +1477,206 @@ def detect_full_migration_signal(
             "strong_full_migration_intent": bool(intent_terms),
             "supported_source_kind": _supported_full_source_kind(source_kind),
         },
+    }
+
+
+def _diff_row_value(row, *names, default=None):
+    for name in names:
+        if isinstance(row, dict) and name in row:
+            return row.get(name)
+        if hasattr(row, "keys") and name in row.keys():
+            return row[name]
+    return default
+
+
+def _diff_row_quality(row):
+    quality = _diff_row_value(row, "quality", default={})
+    return quality if isinstance(quality, dict) else {}
+
+
+def _diff_row_source_kind(row):
+    return _diff_row_value(row, "source_kind") or _diff_row_quality(row).get("source_kind")
+
+
+def _diff_row_message(row):
+    message = _diff_row_value(row, "message", "commit_message", "pr_body", "body")
+    if message:
+        return str(message)
+    title = _diff_row_value(row, "title", "pr_title", "commit_title")
+    return str(title or "")
+
+
+def _diff_row_path(row):
+    return _diff_row_value(row, "matched_changed_path", "search_item_path", "path", default="")
+
+
+def _diff_row_patch(row):
+    parsed_patch = _diff_row_value(row, "parsed_patch")
+    if parsed_patch is not None:
+        return parsed_patch
+    patch_text = _diff_row_value(row, "patch_text", "patch", default="")
+    return parse_patch(patch_text)
+
+
+def _f2_metadata(row):
+    file_path = _diff_row_path(row)
+    patch_path = _diff_row_value(row, "patch_path")
+    return {
+        "repository_full_name": _diff_row_value(row, "repository_full_name"),
+        "commit_sha": _diff_row_value(row, "commit_sha"),
+        "commit_url": _diff_row_value(row, "commit_url"),
+        "file_path": file_path,
+        "patch_path": patch_path,
+        "raw_path": patch_path,
+    }
+
+
+def _enrich_f2_evidence(evidence, row):
+    metadata = _f2_metadata(row)
+    enriched = []
+    for item in evidence or []:
+        enriched.append(
+            {
+                **item,
+                "repository_full_name": item.get("repository_full_name") or metadata["repository_full_name"],
+                "commit_sha": item.get("commit_sha") or metadata["commit_sha"],
+                "commit_url": item.get("commit_url") or metadata["commit_url"],
+                "file_path": item.get("file_path") or metadata["file_path"],
+                "patch_path": item.get("patch_path") or metadata["patch_path"],
+                "raw_path": item.get("raw_path") or metadata["raw_path"],
+            }
+        )
+    return _renumber_evidence(enriched)
+
+
+def _collect_result_evidence(*results):
+    evidence = []
+    for result in results:
+        if result:
+            evidence.extend(result.get("review_evidence", []))
+    return evidence
+
+
+def _collect_reason_codes(*results):
+    reason_codes = []
+    for result in results:
+        if result:
+            reason_codes.extend(result.get("reason_codes", []))
+    return _unique_values(reason_codes)
+
+
+def _f2_classification(diff_row, final_label):
+    target_libraries = _diff_row_value(diff_row, "target_libraries", default=[]) or []
+    matched_pqc = _diff_row_value(diff_row, "matched_pqc_api_signals", default=[]) or []
+    matched_providers = _diff_row_value(diff_row, "matched_provider_signals", default=[]) or []
+    return {
+        "target_legacy_library": target_libraries[0] if target_libraries else None,
+        "target_language": _diff_row_value(diff_row, "language"),
+        "legacy_family": None,
+        "pqc_family": matched_pqc[0] if matched_pqc else None,
+        "pqc_provider_or_library": matched_providers[0] if matched_providers else None,
+        "migration_type": final_label,
+    }
+
+
+def classify_migration(diff_row, configs=None):
+    """Classify one D0-passed exact diff row into an F2 migration label."""
+    patch_config = _config_section(configs, "strong_pqc_signals")
+    migration_config = _config_section(configs, "migration_rules")
+    parsed_patch = _diff_row_patch(diff_row)
+    message = _diff_row_message(diff_row)
+    path = _diff_row_path(diff_row)
+    source_kind = _diff_row_source_kind(diff_row)
+
+    pqc = detect_pqc_added(parsed_patch, patch_config)
+    context = detect_migration_context(parsed_patch, message=message, path=path, config=migration_config)
+    hybrid = detect_hybrid_signal(parsed_patch, message=message, config=migration_config)
+    legacy = detect_legacy_removed(parsed_patch, migration_config)
+    replacement = detect_replacement_signal(
+        parsed_patch,
+        pqc_result=pqc,
+        legacy_result=legacy,
+        config=migration_config,
+    )
+    full = detect_full_migration_signal(
+        parsed_patch,
+        message=message,
+        source_kind=source_kind,
+        pqc_result=pqc,
+        legacy_result=legacy,
+        replacement_result=replacement,
+        config=migration_config,
+    )
+    partial = detect_partial_scope_signal(
+        parsed_patch,
+        message=message,
+        path=path,
+        config=migration_config,
+    )
+
+    if not pqc["pqc_added"]:
+        final_label = "dropped"
+        decision_reason_codes = ["drop_no_pqc_added_in_diff"]
+        decision_evidence = []
+    elif not context["migration_context"]:
+        final_label = "pqc_addition_only"
+        decision_reason_codes = ["no_migration_context"]
+        decision_evidence = _collect_result_evidence(pqc)
+    elif hybrid["hybrid_signal"]:
+        final_label = "hybrid_migration"
+        decision_reason_codes = ["hybrid_signal_detected"]
+        decision_evidence = _collect_result_evidence(pqc, hybrid)
+    elif full["full_migration_signal"]:
+        final_label = "full_migration"
+        decision_reason_codes = ["full_within_changed_scope"]
+        decision_evidence = _collect_result_evidence(full)
+    elif partial["partial_scope_signal"]:
+        final_label = "partial_migration"
+        decision_reason_codes = partial["reason_codes"]
+        decision_evidence = _collect_result_evidence(pqc, replacement, partial)
+    elif replacement["replacement_signal"]:
+        final_label = "dropped"
+        decision_reason_codes = ["ambiguous_replacement_signal"]
+        decision_evidence = _collect_result_evidence(pqc, context, replacement)
+    else:
+        final_label = "dropped"
+        decision_reason_codes = ["no_classifiable_migration_signal"]
+        decision_evidence = _collect_result_evidence(pqc, context)
+
+    reason_codes = _collect_reason_codes(
+        {"reason_codes": decision_reason_codes},
+        pqc,
+        context,
+        hybrid if hybrid["hybrid_signal"] else None,
+        replacement if replacement["replacement_signal"] else None,
+        full if full["full_migration_signal"] else None,
+        partial if partial["partial_scope_signal"] else None,
+    )
+    return {
+        "batch_id": _diff_row_value(diff_row, "batch_id"),
+        "search_item_key": _diff_row_value(diff_row, "search_item_key"),
+        "file_key": _diff_row_value(diff_row, "file_key"),
+        "diff_file_key": _diff_row_value(diff_row, "diff_file_key"),
+        "repository_id": _diff_row_value(diff_row, "repository_id"),
+        "repository_full_name": _diff_row_value(diff_row, "repository_full_name"),
+        "commit_sha": _diff_row_value(diff_row, "commit_sha"),
+        "commit_url": _diff_row_value(diff_row, "commit_url"),
+        "matched_changed_path": path,
+        "patch_path": _diff_row_value(diff_row, "patch_path"),
+        "raw_commit_path": _diff_row_value(diff_row, "raw_commit_path"),
+        "final_label": final_label,
+        "classification": _f2_classification(diff_row, final_label),
+        "signals": {
+            "pqc_added_in_diff": bool(pqc["pqc_added"]),
+            "migration_context": bool(context["migration_context"]),
+            "hybrid_signal": bool(hybrid["hybrid_signal"]),
+            "replacement_signal": bool(replacement["replacement_signal"]),
+            "replacement_strength": replacement.get("replacement_strength"),
+            "partial_scope_signal": bool(partial["partial_scope_signal"]),
+            "full_migration_signal": bool(full["full_migration_signal"]),
+        },
+        "reason_codes": reason_codes,
+        "review_evidence": _enrich_f2_evidence(decision_evidence, diff_row),
     }
 
 
