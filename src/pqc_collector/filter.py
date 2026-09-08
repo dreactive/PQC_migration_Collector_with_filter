@@ -19,6 +19,8 @@ DROP_SOURCE_KINDS = {
     "fuzz_or_benchmark",
     "tooling_metadata",
 }
+DEFAULT_EXPORT_LABELS = {"hybrid_migration", "partial_migration", "full_migration"}
+OPTIONAL_EXPORT_LABELS = {"pqc_addition_only"}
 
 DOC_EXTENSIONS = {".md", ".markdown", ".rst", ".txt", ".adoc"}
 DOC_NAMES = {"readme", "changelog", "changes", "license", "notice", "copying"}
@@ -1681,6 +1683,26 @@ def classify_migration(diff_row, configs=None):
         "review_evidence": _enrich_f2_evidence(decision_evidence, diff_row),
         "quality": _diff_row_quality(diff_row),
     }
+
+
+def _export_label(row):
+    return _diff_row_value(row, "final_label")
+
+
+def _export_review_evidence(row):
+    evidence = _diff_row_value(row, "review_evidence", default=[])
+    return evidence if isinstance(evidence, list) else []
+
+
+def is_export_eligible(f2_result, include_pqc_addition_only=False):
+    """Return whether one F2 result is eligible for export."""
+    label = _export_label(f2_result)
+    allowed_labels = set(DEFAULT_EXPORT_LABELS)
+    if include_pqc_addition_only:
+        allowed_labels.update(OPTIONAL_EXPORT_LABELS)
+    if label not in allowed_labels:
+        return False
+    return bool(_export_review_evidence(f2_result))
 
 
 def _changed_file_current_path(changed_file):
