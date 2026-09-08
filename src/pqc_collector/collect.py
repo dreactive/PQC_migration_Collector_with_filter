@@ -2,7 +2,7 @@ import json
 import os
 from datetime import datetime, timezone
 from urllib.error import HTTPError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from pqc_collector.core import normalize_path, query_page_key
@@ -55,6 +55,12 @@ class GitHubClient:
         else:
             path = "/" + path.lstrip("/")
             url = f"{self.base_url}{path}"
+        parts = urlsplit(url)
+        encoded_path = quote(parts.path, safe="/:%")
+        encoded_query = quote(parts.query, safe="=&?/:+,%")
+        url = urlunsplit(
+            (parts.scheme, parts.netloc, encoded_path, encoded_query, parts.fragment)
+        )
         if params:
             url = f"{url}?{urlencode(params)}"
         return url

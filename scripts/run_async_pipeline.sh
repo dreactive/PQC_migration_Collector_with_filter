@@ -179,7 +179,7 @@ stage_worker() {
           fi
           if [[ "$ok" == "0" && "$RUN_VIEWER" == "1" ]]; then
             run_with_retry build-viewer "$batch_id" "$PYTHON_BIN" runner/collect.py \
-              build-viewer --source "reports/batches/$batch_id/export_candidates.jsonl" || ok=$?
+              build-viewer --source "data/exports/migration_candidates.jsonl" || ok=$?
           fi
           ;;
         *)

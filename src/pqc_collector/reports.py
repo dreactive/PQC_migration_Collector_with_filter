@@ -1281,6 +1281,51 @@ def _resolve_report_path(path, root=None):
     return project_paths(root)["root"] / source_path
 
 
+def _same_path(left, right):
+    try:
+        return Path(left).resolve() == Path(right).resolve()
+    except OSError:
+        return Path(left).absolute() == Path(right).absolute()
+
+
+def _cumulative_export_path(root=None):
+    return project_paths(root)["exports"] / "migration_candidates.jsonl"
+
+
+def _read_viewer_source(path, root=None):
+    source_path = _resolve_report_path(path, root)
+    if source_path.exists():
+        rows, invalid_lines = _read_jsonl_file(source_path)
+        status = "ready"
+    else:
+        rows, invalid_lines = [], []
+        status = "source_not_found"
+
+    cumulative_path = _cumulative_export_path(root)
+    if (
+        source_path.name == "export_candidates.jsonl"
+        and cumulative_path.exists()
+        and not _same_path(source_path, cumulative_path)
+    ):
+        cumulative_rows, cumulative_invalid_lines = _read_jsonl_file(cumulative_path)
+        if len(cumulative_rows) > len(rows):
+            return {
+                "source_path": cumulative_path,
+                "requested_source_path": source_path,
+                "rows": cumulative_rows,
+                "invalid_lines": cumulative_invalid_lines,
+                "status": "ready",
+            }
+
+    return {
+        "source_path": source_path,
+        "requested_source_path": None,
+        "rows": rows,
+        "invalid_lines": invalid_lines,
+        "status": status,
+    }
+
+
 def _row_identity(row, index):
     return row.get("candidate_key") or row.get("candidate_evidence_key") or f"row:{index}"
 
@@ -1727,18 +1772,22 @@ def _viewer_candidate(row, index):
 
 def build_viewer_dataset(export_path, root=None):
     """Build the JSON payload used by the static manual review viewer."""
-    source_path = _resolve_report_path(export_path, root)
-    if source_path.exists():
-        rows, invalid_lines = _read_jsonl_file(source_path)
-        status = "ready"
-    else:
-        rows, invalid_lines = [], []
-        status = "source_not_found"
+    source = _read_viewer_source(export_path, root)
+    source_path = source["source_path"]
+    rows = source["rows"]
+    invalid_lines = source["invalid_lines"]
 
     candidates = [_viewer_candidate(row, index) for index, row in enumerate(rows, start=1)]
     grouped = group_by_migration_type(candidates)
     label_counts = {section_id: len(grouped.get(section_id, [])) for section_id, _title in VIEWER_SECTIONS}
     sections = [
+        {
+            "id": "all",
+            "title": "All Candidates",
+            "count": len(candidates),
+            "candidates": candidates,
+        },
+    ] + [
         {
             "id": section_id,
             "title": title,
@@ -1750,7 +1799,10 @@ def build_viewer_dataset(export_path, root=None):
     return {
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "source_path": str(source_path),
-        "status": status,
+        "requested_source_path": (
+            str(source["requested_source_path"]) if source["requested_source_path"] else None
+        ),
+        "status": source["status"],
         "candidate_count": len(candidates),
         "invalid_json_line_count": len(invalid_lines),
         "invalid_json_lines": invalid_lines,
