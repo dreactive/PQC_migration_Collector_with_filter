@@ -168,6 +168,42 @@ full_migration
 
 `pqc_addition_only`와 `dropped`는 기본 export에서 제외된다.
 
+## Export 후보 원격 검증
+
+`runner/verify_exports.py`는 누적 export를 고정된 snapshot으로 만들고, 후보별 GitHub 저장소 정보, 해당 commit의 변경 파일, primary file의 부모/현재 버전을 가져온다. 검토자는 이 원문과 기존 `review_evidence`를 직접 읽고 `decisions.json`에 후보별 판정과 근거를 작성한다. 키워드로 판정을 자동 생성하지 않는다.
+
+```powershell
+python runner/verify_exports.py prepare --run-id review-20260909
+python runner/verify_exports.py fetch --run-id review-20260909
+python runner/verify_exports.py show --run-id review-20260909 --start 1 --end 10 --mode primary
+# 모든 후보의 decisions.json 작성 후 실행
+python runner/verify_exports.py validate --run-id review-20260909
+python runner/verify_exports.py persist --run-id review-20260909
+```
+
+`fetch`는 `GITHUB_TOKEN`을 사용하고, 같은 run에서 이미 가져온 원문은 재사용한다. 다른 export나 새 원격 조회에는 새 run id를 사용한다. `validate`와 `persist`는 모든 후보의 판정 존재 여부, snapshot hash, 원문에 인용 근거가 실제 존재하는지 검사한다.
+
+기존 `data/collector.sqlite`에 아래 테이블을 추가하며 원래 수집 테이블은 수정하지 않는다. 같은 run id로 재저장하면 해당 검증 결과만 교체하므로 중복되지 않는다.
+
+- `migration_verification_runs`: 검토 기준, export hash, 실행 요약.
+- `migration_candidate_reviews`: 제외/보류를 포함한 전체 판정, 사유, 근거 URL/코드, 원문 dossier 경로/hash. `review_json`에는 source kind와 검토 한계도 포함된다.
+- `verified_migration_dataset`: `accepted` 판정만 저장한 데이터셋. 기존 export label과 별도로 재검토한 `migration_type`을 사용한다.
+
+```sql
+SELECT repository_full_name, commit_sha, primary_path, migration_type
+FROM verified_migration_dataset
+WHERE run_id = 'review-20260909';
+
+SELECT verdict, COUNT(*)
+FROM migration_candidate_reviews
+WHERE run_id = 'review-20260909'
+GROUP BY verdict;
+```
+
+검토 자료는 `reports/verification/{run_id}/`에 저장한다. `review_report.md`는 전체 판정과 근거, `accepted.jsonl`은 채택 결과, `review_policy.json`은 최종 판정 기준이며, `dossiers/`에는 원격 원문이 있다. 이 자료와 DB는 기존 생성 데이터 정책에 따라 git에서 제외된다.
+
+`review-20260909`에서는 86건을 모두 원격 확인했고 4건 채택, 80건 제외, 2건 보류했다. 기존 암호 사용 흐름에 PQC/하이브리드 경로가 실제 연결된 변경만 채택했다. 기존 PQC 코드의 수정, 단독 신규 구현, 벤치마크와 테스트 fixture 등은 제외했다. 채택에는 실제 before/after가 있는 교육용 TLS 클라이언트 1건이 포함되며 `source_kind`로 구분된다. 이는 정적 소스 검토이며 빌드 성공, 실제 배포 또는 암호학적 안전성 검증을 의미하지 않는다.
+
 ## 로그
 
 비동기 pipeline 로그:
