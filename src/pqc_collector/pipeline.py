@@ -42,6 +42,7 @@ from pqc_collector.storage import (
     upsert_f0_result,
     upsert_f2_result,
     upsert_f1_result,
+    upsert_file_fetch_result,
     upsert_file_snapshot,
     write_batch_export,
     write_non_exported_candidates,
@@ -93,6 +94,7 @@ def fetch_file_batch(conn, batch_id, client, limit=None, root=None):
     queue = list(iter_f0_passed_items(conn, batch_id, limit))
     fetched_rows = []
     skipped_rows = []
+    error_rows = []
     new_snapshot_count = 0
     updated_snapshot_count = 0
 
@@ -101,10 +103,31 @@ def fetch_file_batch(conn, batch_id, client, limit=None, root=None):
         existing = read_file_snapshot(conn, key)
         if existing:
             existing["status"] = "existing"
+            upsert_file_fetch_result(
+                conn,
+                batch_id,
+                item,
+                "existing",
+                file_key_value=key,
+                raw_file_path=existing.get("raw_file_path"),
+            )
             skipped_rows.append(existing)
             continue
 
-        response = client.get_file(item["file_api_url"])
+        try:
+            response = client.get_file(item["file_api_url"])
+        except Exception as exc:
+            error_rows.append(
+                upsert_file_fetch_result(
+                    conn,
+                    batch_id,
+                    item,
+                    "error",
+                    file_key_value=key,
+                    error=exc,
+                )
+            )
+            continue
         raw_path = write_raw_response(
             batch_id,
             "file",
@@ -113,6 +136,14 @@ def fetch_file_batch(conn, batch_id, client, limit=None, root=None):
             root,
         )
         stored_row = upsert_file_snapshot(conn, batch_id, item, response, raw_path)
+        upsert_file_fetch_result(
+            conn,
+            batch_id,
+            item,
+            "fetched",
+            file_key_value=stored_row["file_key"],
+            raw_file_path=stored_row["raw_file_path"],
+        )
         if stored_row["status"] == "new":
             new_snapshot_count += 1
         else:
@@ -121,15 +152,18 @@ def fetch_file_batch(conn, batch_id, client, limit=None, root=None):
 
     return {
         "batch_id": batch_id,
-        "status": "completed",
+        "status": "completed_with_errors" if error_rows else "completed",
         "queued_item_count": len(queue),
         "fetched_item_count": len(fetched_rows),
         "skipped_existing_count": len(skipped_rows),
+        "error_item_count": len(error_rows),
         "new_snapshot_count": new_snapshot_count,
         "updated_snapshot_count": updated_snapshot_count,
         "raw_file_paths": [row["raw_file_path"] for row in fetched_rows],
+        "errors": error_rows,
         "sample_fetched_row": fetched_rows[0] if fetched_rows else None,
         "sample_skipped_row": skipped_rows[0] if skipped_rows else None,
+        "sample_error_row": error_rows[0] if error_rows else None,
     }
 
 

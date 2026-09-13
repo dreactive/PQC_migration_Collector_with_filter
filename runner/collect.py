@@ -51,8 +51,10 @@ from pqc_collector.reports import (  # noqa: E402
 )
 from pqc_collector.storage import (  # noqa: E402
     connect,
+    compute_pipeline_handoff_status,
     get_next_unprocessed_f0_batch_id,
     init_db,
+    pending_pipeline_batches,
     store_search_page,
     write_raw_response,
 )
@@ -280,6 +282,46 @@ def check_rate_limit(batch_id):
     }
 
 
+def _safe_queue_name(value):
+    return "".join(char if char.isalnum() or char in "._-" else "_" for char in str(value))
+
+
+def plan_recovery(stage="all", queue_dir=None, limit=None, include_errors=False):
+    """Find DB-visible pending work and optionally write pipeline queue files."""
+    conn = connect(root=PROJECT_ROOT)
+    try:
+        init_db(conn)
+        batches = pending_pipeline_batches(
+            conn,
+            stage=stage,
+            limit=limit,
+            include_errors=include_errors,
+        )
+        handoff_status = compute_pipeline_handoff_status(conn)
+    finally:
+        conn.close()
+
+    written = []
+    if queue_dir is not None:
+        queue_root = Path(queue_dir)
+        for row in batches:
+            stage_dir = queue_root / row["stage"]
+            stage_dir.mkdir(parents=True, exist_ok=True)
+            ready_path = stage_dir / f"{_safe_queue_name(row['batch_id'])}.ready"
+            ready_path.write_text(f"{row['batch_id']}\n", encoding="utf-8")
+            written.append(str(ready_path))
+
+    return {
+        "stage": stage,
+        "queue_dir": str(queue_dir) if queue_dir is not None else None,
+        "include_errors": bool(include_errors),
+        "pending_batch_count": len(batches),
+        "pending_batches": batches,
+        "written_queue_files": written,
+        "handoff_status": handoff_status,
+    }
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="PQC migration collector runner.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -322,6 +364,28 @@ def build_parser():
     )
     rate_limit = subparsers.add_parser("check-rate-limit", help="Call GitHub /rate_limit once.")
     rate_limit.add_argument("--batch-id", default="batch-rate-limit")
+    recovery = subparsers.add_parser(
+        "plan-recovery",
+        help="Find DB-visible pending pipeline work and optionally recreate queue files.",
+    )
+    recovery.add_argument(
+        "--stage",
+        default="all",
+        choices=("all", "f0", "files", "f1", "d0", "f2"),
+        help="Stage to recover. Use all to scan every handoff boundary.",
+    )
+    recovery.add_argument(
+        "--queue-dir",
+        default=None,
+        type=Path,
+        help="Pipeline queue directory where stage/*.ready files should be written.",
+    )
+    recovery.add_argument("--limit", default=None, type=int)
+    recovery.add_argument(
+        "--include-errors",
+        action="store_true",
+        help="Include file fetch error batches in recovery queues for retry.",
+    )
     search_page = subparsers.add_parser("fetch-search-page", help="Fetch one raw search page.")
     search_page.add_argument("--batch-id", required=True)
     search_page.add_argument("--query-text", required=True)
@@ -449,6 +513,16 @@ def main(argv=None):
 
     if args.command == "check-rate-limit":
         result = check_rate_limit(args.batch_id)
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "plan-recovery":
+        result = plan_recovery(
+            args.stage,
+            args.queue_dir,
+            args.limit,
+            include_errors=args.include_errors,
+        )
         print(json.dumps(result, indent=2))
         return 0
 

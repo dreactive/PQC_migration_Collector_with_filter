@@ -121,6 +121,55 @@ def init_raw_search_items_table(conn):
     conn.commit()
 
 
+def init_raw_search_item_occurrences_table(conn):
+    """Create the raw search item occurrence history table."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS raw_search_item_occurrences (
+            search_item_key TEXT NOT NULL,
+            batch_id TEXT NOT NULL,
+            query_key TEXT NOT NULL,
+            query_page_key TEXT NOT NULL,
+            raw_query_page_path TEXT NOT NULL,
+            seen_at TEXT NOT NULL,
+            PRIMARY KEY (search_item_key, batch_id, query_page_key),
+            FOREIGN KEY (search_item_key) REFERENCES raw_search_items (search_item_key),
+            FOREIGN KEY (query_page_key) REFERENCES query_pages (query_page_key)
+        )
+        """
+    )
+    conn.commit()
+
+
+def backfill_raw_search_item_occurrences(conn):
+    """Seed occurrence history from the current raw item rows when upgrading a DB."""
+    checked_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO raw_search_item_occurrences (
+            search_item_key,
+            batch_id,
+            query_key,
+            query_page_key,
+            raw_query_page_path,
+            seen_at
+        )
+        SELECT
+            r.search_item_key,
+            r.batch_id,
+            r.query_key,
+            r.query_page_key,
+            r.raw_query_page_path,
+            COALESCE(q.fetched_at, ?)
+        FROM raw_search_items AS r
+        LEFT JOIN query_pages AS q
+            ON q.query_page_key = r.query_page_key
+        """,
+        (checked_at,),
+    )
+    conn.commit()
+
+
 def init_f0_results_table(conn):
     """Create the F0 path quality result table."""
     conn.execute(
@@ -166,6 +215,34 @@ def init_files_table(conn):
             fetched_at TEXT NOT NULL,
             FOREIGN KEY (repository_key) REFERENCES repositories (repository_key)
         )
+        """
+    )
+    conn.commit()
+
+
+def init_file_fetch_results_table(conn):
+    """Create the per-search-item file fetch status table."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS file_fetch_results (
+            batch_id TEXT NOT NULL,
+            search_item_key TEXT NOT NULL,
+            file_key TEXT,
+            status TEXT NOT NULL,
+            error_type TEXT,
+            error_message TEXT,
+            attempt_count INTEGER NOT NULL DEFAULT 1,
+            raw_file_path TEXT,
+            checked_at TEXT NOT NULL,
+            PRIMARY KEY (batch_id, search_item_key),
+            FOREIGN KEY (search_item_key) REFERENCES raw_search_items (search_item_key)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_file_fetch_results_status
+        ON file_fetch_results (batch_id, status)
         """
     )
     conn.commit()
@@ -297,8 +374,11 @@ def init_db(conn):
     init_query_pages_table(conn)
     init_repositories_table(conn)
     init_raw_search_items_table(conn)
+    init_raw_search_item_occurrences_table(conn)
+    backfill_raw_search_item_occurrences(conn)
     init_f0_results_table(conn)
     init_files_table(conn)
+    init_file_fetch_results_table(conn)
     init_f1_results_table(conn)
     init_diff_evidence_table(conn)
     init_f2_results_table(conn)
@@ -568,6 +648,7 @@ def upsert_raw_search_item(conn, batch_id, query_key, query_page_key, item, raw_
     status = "existing" if existing else "new"
     first_seen_batch_id = existing["first_seen_batch_id"] if existing else batch_id
     repository_url = repository.get("html_url") or repository.get("url")
+    checked_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     conn.execute(
         """
@@ -617,6 +698,31 @@ def upsert_raw_search_item(conn, batch_id, query_key, query_page_key, item, raw_
             first_seen_batch_id,
             batch_id,
             str(raw_query_page_path),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO raw_search_item_occurrences (
+            search_item_key,
+            batch_id,
+            query_key,
+            query_page_key,
+            raw_query_page_path,
+            seen_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(search_item_key, batch_id, query_page_key) DO UPDATE SET
+            query_key = excluded.query_key,
+            raw_query_page_path = excluded.raw_query_page_path,
+            seen_at = excluded.seen_at
+        """,
+        (
+            item_key,
+            batch_id,
+            query_key,
+            query_page_key,
+            str(raw_query_page_path),
+            checked_at,
         ),
     )
     conn.commit()
@@ -719,7 +825,8 @@ def iter_f0_passed_items(conn, batch_id, limit=None):
     rows = conn.execute(
         f"""
         SELECT
-            raw_search_items.batch_id AS batch_id,
+            f0_results.batch_id AS batch_id,
+            raw_search_items.batch_id AS current_raw_batch_id,
             raw_search_items.search_item_key AS search_item_key,
             raw_search_items.query_key AS query_key,
             raw_search_items.repository_key AS repository_key,
@@ -737,8 +844,7 @@ def iter_f0_passed_items(conn, batch_id, limit=None):
             f0_results.checked_at AS f0_checked_at
         FROM f0_results
         INNER JOIN raw_search_items
-            ON raw_search_items.batch_id = f0_results.batch_id
-            AND raw_search_items.search_item_key = f0_results.search_item_key
+            ON raw_search_items.search_item_key = f0_results.search_item_key
         WHERE f0_results.batch_id = ?
             AND f0_results.passed = 1
         ORDER BY
@@ -789,7 +895,8 @@ def iter_files_for_f1(conn, batch_id, limit=None):
     rows = conn.execute(
         f"""
         SELECT
-            raw_search_items.batch_id AS batch_id,
+            f0_results.batch_id AS batch_id,
+            raw_search_items.batch_id AS current_raw_batch_id,
             raw_search_items.search_item_key AS search_item_key,
             raw_search_items.query_key AS query_key,
             raw_search_items.repository_key AS repository_key,
@@ -812,8 +919,7 @@ def iter_files_for_f1(conn, batch_id, limit=None):
             file_snapshots.fetched_at AS file_fetched_at
         FROM f0_results
         INNER JOIN raw_search_items
-            ON raw_search_items.batch_id = f0_results.batch_id
-            AND raw_search_items.search_item_key = f0_results.search_item_key
+            ON raw_search_items.search_item_key = f0_results.search_item_key
         INNER JOIN file_snapshots
             ON file_snapshots.repository_id = raw_search_items.repository_id
             AND file_snapshots.normalized_path = raw_search_items.normalized_path
@@ -845,7 +951,8 @@ def iter_f1_passed_items(conn, batch_id, limit=None):
     rows = conn.execute(
         f"""
         SELECT
-            raw_search_items.batch_id AS batch_id,
+            f1_results.batch_id AS batch_id,
+            raw_search_items.batch_id AS current_raw_batch_id,
             raw_search_items.search_item_key AS search_item_key,
             raw_search_items.query_key AS query_key,
             raw_search_items.repository_key AS repository_key,
@@ -872,8 +979,7 @@ def iter_f1_passed_items(conn, batch_id, limit=None):
             f1_results.checked_at AS f1_checked_at
         FROM f1_results
         INNER JOIN raw_search_items
-            ON raw_search_items.batch_id = f1_results.batch_id
-            AND raw_search_items.search_item_key = f1_results.search_item_key
+            ON raw_search_items.search_item_key = f1_results.search_item_key
         INNER JOIN file_snapshots
             ON file_snapshots.file_key = f1_results.file_key
         WHERE f1_results.batch_id = ?
@@ -911,6 +1017,7 @@ def iter_d0_passed_rows(conn, batch_id, limit=None):
         f"""
         SELECT
             d0_results.batch_id AS batch_id,
+            raw_search_items.batch_id AS current_raw_batch_id,
             d0_results.search_item_key AS search_item_key,
             d0_results.file_key AS file_key,
             d0_results.diff_file_key AS diff_file_key,
@@ -938,8 +1045,7 @@ def iter_d0_passed_rows(conn, batch_id, limit=None):
             file_snapshots.raw_file_path AS raw_file_path
         FROM d0_results
         INNER JOIN raw_search_items
-            ON raw_search_items.batch_id = d0_results.batch_id
-            AND raw_search_items.search_item_key = d0_results.search_item_key
+            ON raw_search_items.search_item_key = d0_results.search_item_key
         INNER JOIN f1_results
             ON f1_results.batch_id = d0_results.batch_id
             AND f1_results.search_item_key = d0_results.search_item_key
@@ -1072,6 +1178,82 @@ def upsert_file_snapshot(conn, batch_id, item, response, raw_path, fetched_at=No
         "raw_file_path": row["raw_file_path"],
         "first_seen_batch_id": first_seen_batch_id,
         "last_seen_batch_id": batch_id,
+    }
+
+
+def upsert_file_fetch_result(
+    conn,
+    batch_id,
+    item,
+    status,
+    file_key_value=None,
+    error=None,
+    raw_file_path=None,
+    checked_at=None,
+):
+    """Insert or update one file-fetch status row for a search item."""
+    timestamp = checked_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    search_key = item["search_item_key"]
+    key = file_key_value
+    if key is None and all(item.get(name) is not None for name in ("repository_id", "normalized_path", "blob_sha")):
+        key = file_key(item["repository_id"], item["normalized_path"], item["blob_sha"])
+    existing = conn.execute(
+        """
+        SELECT attempt_count
+        FROM file_fetch_results
+        WHERE batch_id = ? AND search_item_key = ?
+        """,
+        (batch_id, search_key),
+    ).fetchone()
+    attempt_count = int(existing["attempt_count"]) + 1 if existing else 1
+    error_type = type(error).__name__ if error is not None else None
+    error_message = str(error)[:1000] if error is not None else None
+    conn.execute(
+        """
+        INSERT INTO file_fetch_results (
+            batch_id,
+            search_item_key,
+            file_key,
+            status,
+            error_type,
+            error_message,
+            attempt_count,
+            raw_file_path,
+            checked_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(batch_id, search_item_key) DO UPDATE SET
+            file_key = excluded.file_key,
+            status = excluded.status,
+            error_type = excluded.error_type,
+            error_message = excluded.error_message,
+            attempt_count = excluded.attempt_count,
+            raw_file_path = excluded.raw_file_path,
+            checked_at = excluded.checked_at
+        """,
+        (
+            batch_id,
+            search_key,
+            key,
+            status,
+            error_type,
+            error_message,
+            attempt_count,
+            raw_file_path,
+            timestamp,
+        ),
+    )
+    conn.commit()
+    return {
+        "batch_id": batch_id,
+        "search_item_key": search_key,
+        "file_key": key,
+        "status": status,
+        "error_type": error_type,
+        "error_message": error_message,
+        "attempt_count": attempt_count,
+        "raw_file_path": raw_file_path,
+        "checked_at": timestamp,
     }
 
 
@@ -1505,6 +1687,257 @@ def read_export_candidates(conn, batch_id=None):
         tuple(params),
     ).fetchall()
     return [_f2_export_candidate_row(row) for row in rows]
+
+
+def _batch_filter(alias, batch_id, params):
+    if batch_id is None:
+        return ""
+    params.append(batch_id)
+    return f"AND {alias}.batch_id = ?"
+
+
+def _count_query(conn, sql, params=()):
+    return int(conn.execute(sql, tuple(params)).fetchone()[0])
+
+
+def compute_pipeline_handoff_status(conn, batch_id=None):
+    """Return pending and error counts at each pipeline handoff boundary."""
+    raw_params = []
+    raw_batch_filter = _batch_filter("r", batch_id, raw_params)
+    f0_params = []
+    f0_batch_filter = _batch_filter("f0", batch_id, f0_params)
+    f1_params = []
+    f1_batch_filter = _batch_filter("f1", batch_id, f1_params)
+    d0_params = []
+    d0_batch_filter = _batch_filter("d0", batch_id, d0_params)
+    status = {
+        "batch_id": batch_id,
+        "f0": {
+            "pending": _count_query(
+                conn,
+                f"""
+                SELECT COUNT(*)
+                FROM raw_search_items AS r
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM f0_results AS f0
+                    WHERE f0.search_item_key = r.search_item_key
+                )
+                {raw_batch_filter}
+                """,
+                raw_params,
+            ),
+            "error": 0,
+        },
+        "files": {
+            "pending": _count_query(
+                conn,
+                f"""
+                SELECT COUNT(*)
+                FROM f0_results AS f0
+                INNER JOIN raw_search_items AS r
+                    ON r.search_item_key = f0.search_item_key
+                LEFT JOIN file_snapshots AS fs
+                    ON fs.repository_id = r.repository_id
+                    AND fs.normalized_path = r.normalized_path
+                    AND fs.blob_sha = r.blob_sha
+                LEFT JOIN file_fetch_results AS ff
+                    ON ff.batch_id = f0.batch_id
+                    AND ff.search_item_key = f0.search_item_key
+                    AND ff.status = 'error'
+                WHERE f0.passed = 1
+                    AND fs.file_key IS NULL
+                    AND ff.search_item_key IS NULL
+                    {f0_batch_filter}
+                """,
+                f0_params,
+            ),
+            "error": _count_query(
+                conn,
+                f"""
+                SELECT COUNT(*)
+                FROM file_fetch_results AS ff
+                WHERE ff.status = 'error'
+                {"AND ff.batch_id = ?" if batch_id is not None else ""}
+                """,
+                (batch_id,) if batch_id is not None else (),
+            ),
+        },
+        "f1": {
+            "pending": _count_query(
+                conn,
+                f"""
+                SELECT COUNT(*)
+                FROM f0_results AS f0
+                INNER JOIN raw_search_items AS r
+                    ON r.search_item_key = f0.search_item_key
+                INNER JOIN file_snapshots AS fs
+                    ON fs.repository_id = r.repository_id
+                    AND fs.normalized_path = r.normalized_path
+                    AND fs.blob_sha = r.blob_sha
+                WHERE f0.passed = 1
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM f1_results AS f1
+                        WHERE f1.batch_id = f0.batch_id
+                            AND f1.search_item_key = f0.search_item_key
+                    )
+                    {f0_batch_filter}
+                """,
+                f0_params,
+            ),
+            "error": 0,
+        },
+        "d0": {
+            "pending": _count_query(
+                conn,
+                f"""
+                SELECT COUNT(*)
+                FROM f1_results AS f1
+                WHERE f1.passed = 1
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM d0_results AS d0
+                        WHERE d0.batch_id = f1.batch_id
+                            AND d0.search_item_key = f1.search_item_key
+                    )
+                    {f1_batch_filter}
+                """,
+                f1_params,
+            ),
+            "error": 0,
+        },
+        "f2": {
+            "pending": _count_query(
+                conn,
+                f"""
+                SELECT COUNT(*)
+                FROM d0_results AS d0
+                WHERE d0.passed = 1
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM f2_results AS f2
+                        WHERE f2.batch_id = d0.batch_id
+                            AND f2.search_item_key = d0.search_item_key
+                            AND f2.commit_sha = d0.commit_sha
+                    )
+                    {d0_batch_filter}
+                """,
+                d0_params,
+            ),
+            "error": 0,
+        },
+    }
+    status["total_pending"] = sum(stage["pending"] for stage in status.values() if isinstance(stage, dict))
+    status["total_error"] = sum(stage["error"] for stage in status.values() if isinstance(stage, dict))
+    return status
+
+
+def _pending_batches(conn, sql, params=(), limit=None):
+    rows = conn.execute(sql, tuple(params)).fetchall()
+    results = [
+        {
+            "stage": row["stage"],
+            "batch_id": row["batch_id"],
+            "pending_count": int(row["pending_count"]),
+        }
+        for row in rows
+    ]
+    if limit is not None:
+        return results[: max(0, int(limit))]
+    return results
+
+
+def pending_pipeline_batches(conn, stage="all", limit=None, include_errors=False):
+    """Return batches that have DB-visible work missing at a later stage."""
+    stage = str(stage or "all").lower()
+    file_error_filter = "" if include_errors else "AND ff.search_item_key IS NULL"
+    queries = {
+        "f0": """
+            SELECT 'f0' AS stage, r.batch_id AS batch_id, COUNT(*) AS pending_count
+            FROM raw_search_items AS r
+            WHERE NOT EXISTS (
+                SELECT 1 FROM f0_results AS f0
+                WHERE f0.search_item_key = r.search_item_key
+            )
+            GROUP BY r.batch_id
+            HAVING pending_count > 0
+            ORDER BY r.batch_id
+        """,
+        "files": """
+            SELECT 'files' AS stage, f0.batch_id AS batch_id, COUNT(*) AS pending_count
+            FROM f0_results AS f0
+            INNER JOIN raw_search_items AS r
+                ON r.search_item_key = f0.search_item_key
+            LEFT JOIN file_snapshots AS fs
+                ON fs.repository_id = r.repository_id
+                AND fs.normalized_path = r.normalized_path
+                AND fs.blob_sha = r.blob_sha
+            LEFT JOIN file_fetch_results AS ff
+                ON ff.batch_id = f0.batch_id
+                AND ff.search_item_key = f0.search_item_key
+                AND ff.status = 'error'
+            WHERE f0.passed = 1
+                AND fs.file_key IS NULL
+                {file_error_filter}
+            GROUP BY f0.batch_id
+            HAVING pending_count > 0
+            ORDER BY f0.batch_id
+        """.format(file_error_filter=file_error_filter),
+        "f1": """
+            SELECT 'f1' AS stage, f0.batch_id AS batch_id, COUNT(*) AS pending_count
+            FROM f0_results AS f0
+            INNER JOIN raw_search_items AS r
+                ON r.search_item_key = f0.search_item_key
+            INNER JOIN file_snapshots AS fs
+                ON fs.repository_id = r.repository_id
+                AND fs.normalized_path = r.normalized_path
+                AND fs.blob_sha = r.blob_sha
+            WHERE f0.passed = 1
+                AND NOT EXISTS (
+                    SELECT 1 FROM f1_results AS f1
+                    WHERE f1.batch_id = f0.batch_id
+                        AND f1.search_item_key = f0.search_item_key
+                )
+            GROUP BY f0.batch_id
+            HAVING pending_count > 0
+            ORDER BY f0.batch_id
+        """,
+        "d0": """
+            SELECT 'd0' AS stage, f1.batch_id AS batch_id, COUNT(*) AS pending_count
+            FROM f1_results AS f1
+            WHERE f1.passed = 1
+                AND NOT EXISTS (
+                    SELECT 1 FROM d0_results AS d0
+                    WHERE d0.batch_id = f1.batch_id
+                        AND d0.search_item_key = f1.search_item_key
+                )
+            GROUP BY f1.batch_id
+            HAVING pending_count > 0
+            ORDER BY f1.batch_id
+        """,
+        "f2": """
+            SELECT 'f2' AS stage, d0.batch_id AS batch_id, COUNT(*) AS pending_count
+            FROM d0_results AS d0
+            WHERE d0.passed = 1
+                AND NOT EXISTS (
+                    SELECT 1 FROM f2_results AS f2
+                    WHERE f2.batch_id = d0.batch_id
+                        AND f2.search_item_key = d0.search_item_key
+                        AND f2.commit_sha = d0.commit_sha
+                )
+            GROUP BY d0.batch_id
+            HAVING pending_count > 0
+            ORDER BY d0.batch_id
+        """,
+    }
+    selected = queries if stage == "all" else {stage: queries[stage]}
+    batches = []
+    for sql in selected.values():
+        batches.extend(_pending_batches(conn, sql))
+    if limit is not None:
+        return batches[: max(0, int(limit))]
+    return batches
 
 
 def _merge_export_row(existing, new_row):

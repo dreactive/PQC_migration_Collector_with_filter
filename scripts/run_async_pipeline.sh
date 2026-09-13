@@ -25,6 +25,9 @@ RUN_REPORTS="${RUN_REPORTS:-1}"
 RUN_EXPORT="${RUN_EXPORT:-1}"
 RUN_VIEWER="${RUN_VIEWER:-1}"
 CHECK_RATE_LIMIT="${CHECK_RATE_LIMIT:-1}"
+RECOVER_PENDING="${RECOVER_PENDING:-0}"
+RECOVERY_STAGE="${RECOVERY_STAGE:-all}"
+RECOVER_ERRORS="${RECOVER_ERRORS:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 
 RUN_DIR="temp/async_pipeline/$RUN_ID"
@@ -273,6 +276,16 @@ log_line "query_group=$QUERY_GROUP query_key=$QUERY_KEY start_page=$START_PAGE p
 if [[ "$CHECK_RATE_LIMIT" == "1" ]]; then
   run_with_retry rate-limit "$RUN_ID" "$PYTHON_BIN" runner/collect.py \
     check-rate-limit --batch-id "rate-limit-$RUN_ID"
+fi
+
+if [[ "$RECOVER_PENDING" == "1" ]]; then
+  if [[ "$RECOVER_ERRORS" == "1" ]]; then
+    run_with_retry recover-pending "$RUN_ID" "$PYTHON_BIN" runner/collect.py \
+      plan-recovery --stage "$RECOVERY_STAGE" --queue-dir "$QUEUE_DIR" --include-errors
+  else
+    run_with_retry recover-pending "$RUN_ID" "$PYTHON_BIN" runner/collect.py \
+      plan-recovery --stage "$RECOVERY_STAGE" --queue-dir "$QUEUE_DIR"
+  fi
 fi
 
 stage_worker f0 f0 files f0 &

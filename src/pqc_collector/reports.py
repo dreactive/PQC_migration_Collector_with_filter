@@ -933,17 +933,29 @@ def _batch_rows(conn, table, batch_id):
 
 def summarize_filter_results(conn, batch_id):
     """Return the combined F0/F1/D0/F2 filter summary for one batch."""
+    from pqc_collector.storage import compute_pipeline_handoff_status
+
     f0_rows = _batch_rows(conn, "f0_results", batch_id)
     f1_rows = _batch_rows(conn, "f1_results", batch_id)
     d0_rows = _batch_rows(conn, "d0_results", batch_id)
     f2_rows = _batch_rows(conn, "f2_results", batch_id)
+    file_fetch_rows = _batch_rows(conn, "file_fetch_results", batch_id)
+    file_fetch_status_counts = {}
+    for row in file_fetch_rows:
+        status = row["status"]
+        file_fetch_status_counts[status] = file_fetch_status_counts.get(status, 0) + 1
     return {
         "batch_id": batch_id,
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "f0": summarize_f0_results(f0_rows),
+        "files": {
+            "total": len(file_fetch_rows),
+            "status_counts": dict(sorted(file_fetch_status_counts.items())),
+        },
         "f1": summarize_f1_results(f1_rows),
         "d0": summarize_d0_results(d0_rows),
         "f2": summarize_f2_results(f2_rows),
+        "handoff": compute_pipeline_handoff_status(conn, batch_id),
         "export": {
             "default_export_count": 0,
             "non_exported_count": 0,
@@ -963,9 +975,11 @@ def write_filter_summary_json(summary, batch_id, output_path=None, root=None):
         datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     )
     row.setdefault("f0", {})
+    row.setdefault("files", {})
     row.setdefault("f1", {})
     row.setdefault("d0", {})
     row.setdefault("f2", {})
+    row.setdefault("handoff", {})
     row.setdefault("export", {})
     with report_path.open("w", encoding="utf-8") as handle:
         json.dump(row, handle, ensure_ascii=True, indent=2, sort_keys=True)
@@ -996,7 +1010,7 @@ def write_filter_summary_md(summary, batch_id, output_path=None, root=None):
         f"- `generated_at`: {row['generated_at']}",
         "",
     ]
-    for stage in ("f0", "f1", "d0", "f2", "export"):
+    for stage in ("f0", "files", "f1", "d0", "f2", "handoff", "export"):
         data = row.get(stage, {})
         lines.append(f"## {stage.upper()}")
         if stage == "f2":
@@ -1006,6 +1020,16 @@ def write_filter_summary_md(summary, batch_id, output_path=None, root=None):
             lines.append(
                 f"- `rows_without_review_evidence`: {data.get('rows_without_review_evidence', 0)}"
             )
+        elif stage == "files":
+            lines.append(f"- `total`: {data.get('total', 0)}")
+            lines.extend(_summary_count_lines("status_counts", data.get("status_counts", {})))
+        elif stage == "handoff":
+            lines.append(f"- `total_pending`: {data.get('total_pending', 0)}")
+            lines.append(f"- `total_error`: {data.get('total_error', 0)}")
+            for boundary in ("f0", "files", "f1", "d0", "f2"):
+                boundary_data = data.get(boundary, {})
+                lines.append(f"- `{boundary}.pending`: {boundary_data.get('pending', 0)}")
+                lines.append(f"- `{boundary}.error`: {boundary_data.get('error', 0)}")
         elif stage == "export":
             lines.extend(f"- `{key}`: {value}" for key, value in sorted(data.items()))
         else:
