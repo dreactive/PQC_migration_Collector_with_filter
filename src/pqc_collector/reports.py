@@ -221,6 +221,9 @@ REPORT_SCHEMAS = {
             "reason_codes",
             "raw_commit_path",
             "patch_path",
+            "evidence_status",
+            "evidence_reason_code",
+            "d0_status",
             "checked_at",
         ],
     },
@@ -767,6 +770,9 @@ def normalize_d0_report_row(batch_id, row):
         "reason_codes": _json_list_field(item, "reason_codes"),
         "raw_commit_path": item["raw_commit_path"],
         "patch_path": item.get("patch_path"),
+        "evidence_status": item.get("evidence_status", "processed"),
+        "evidence_reason_code": item.get("evidence_reason_code"),
+        "d0_status": item.get("d0_status", "processed"),
         "checked_at": item["checked_at"],
     }
 
@@ -800,27 +806,47 @@ def summarize_d0_results(rows):
     """Return pass/drop counts for D0 exact diff evidence results."""
     summary = {
         "total": 0,
+        "file_count": 0,
+        "commit_count": 0,
         "pass": 0,
         "drop": 0,
         "exact_path_match_count": 0,
         "patch_available_count": 0,
+        "evidence_unavailable_count": 0,
+        "evidence_status_counts": {},
+        "d0_status_counts": {},
         "review_evidence_count": 0,
         "reason_counts": {},
     }
+    file_keys = set()
     for row in rows:
         item = dict(row)
         passed = bool(item["passed"])
         summary["total"] += 1
+        summary["commit_count"] += 1
+        if item.get("search_item_key"):
+            file_keys.add(item["search_item_key"])
         summary["pass" if passed else "drop"] += 1
         if item.get("exact_path_match"):
             summary["exact_path_match_count"] += 1
         if item.get("patch_available"):
             summary["patch_available_count"] += 1
+        evidence_status = item.get("evidence_status") or "processed"
+        d0_status = item.get("d0_status") or "processed"
+        summary["evidence_status_counts"][evidence_status] = (
+            summary["evidence_status_counts"].get(evidence_status, 0) + 1
+        )
+        summary["d0_status_counts"][d0_status] = summary["d0_status_counts"].get(d0_status, 0) + 1
+        if evidence_status == "unavailable":
+            summary["evidence_unavailable_count"] += 1
         summary["review_evidence_count"] += len(_json_list_field(item, "review_evidence"))
         for reason_code in _json_list_field(item, "reason_codes"):
             summary["reason_counts"][reason_code] = summary["reason_counts"].get(reason_code, 0) + 1
 
+    summary["file_count"] = len(file_keys)
     summary["reason_counts"] = dict(sorted(summary["reason_counts"].items()))
+    summary["evidence_status_counts"] = dict(sorted(summary["evidence_status_counts"].items()))
+    summary["d0_status_counts"] = dict(sorted(summary["d0_status_counts"].items()))
     return summary
 
 
@@ -940,10 +966,24 @@ def summarize_filter_results(conn, batch_id):
     d0_rows = _batch_rows(conn, "d0_results", batch_id)
     f2_rows = _batch_rows(conn, "f2_results", batch_id)
     file_fetch_rows = _batch_rows(conn, "file_fetch_results", batch_id)
+    d0_history_rows = _batch_rows(conn, "d0_history_state", batch_id)
+    d0_commit_status_rows = _batch_rows(conn, "d0_commit_status", batch_id)
     file_fetch_status_counts = {}
     for row in file_fetch_rows:
         status = row["status"]
         file_fetch_status_counts[status] = file_fetch_status_counts.get(status, 0) + 1
+    d0_history_status_counts = {}
+    for row in d0_history_rows:
+        status = row["status"]
+        d0_history_status_counts[status] = d0_history_status_counts.get(status, 0) + 1
+    d0_commit_status_counts = {}
+    for row in d0_commit_status_rows:
+        status = row["status"]
+        d0_commit_status_counts[status] = d0_commit_status_counts.get(status, 0) + 1
+    d0_summary = summarize_d0_results(d0_rows)
+    d0_summary["history_file_count"] = len(d0_history_rows)
+    d0_summary["history_status_counts"] = dict(sorted(d0_history_status_counts.items()))
+    d0_summary["commit_status_counts"] = dict(sorted(d0_commit_status_counts.items()))
     return {
         "batch_id": batch_id,
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -953,7 +993,7 @@ def summarize_filter_results(conn, batch_id):
             "status_counts": dict(sorted(file_fetch_status_counts.items())),
         },
         "f1": summarize_f1_results(f1_rows),
-        "d0": summarize_d0_results(d0_rows),
+        "d0": d0_summary,
         "f2": summarize_f2_results(f2_rows),
         "handoff": compute_pipeline_handoff_status(conn, batch_id),
         "export": {
@@ -1034,6 +1074,22 @@ def write_filter_summary_md(summary, batch_id, output_path=None, root=None):
             lines.extend(f"- `{key}`: {value}" for key, value in sorted(data.items()))
         else:
             lines.append(f"- `total`: {data.get('total', 0)}")
+            if stage == "d0":
+                lines.append(f"- `file_count`: {data.get('file_count', 0)}")
+                lines.append(f"- `commit_count`: {data.get('commit_count', 0)}")
+                lines.append(f"- `history_file_count`: {data.get('history_file_count', 0)}")
+                lines.extend(
+                    _summary_count_lines("history_status_counts", data.get("history_status_counts", {}))
+                )
+                lines.extend(
+                    _summary_count_lines("commit_status_counts", data.get("commit_status_counts", {}))
+                )
+                lines.append(
+                    f"- `evidence_unavailable_count`: {data.get('evidence_unavailable_count', 0)}"
+                )
+                lines.extend(
+                    _summary_count_lines("evidence_status_counts", data.get("evidence_status_counts", {}))
+                )
             lines.append(f"- `pass`: {data.get('pass', 0)}")
             lines.append(f"- `drop`: {data.get('drop', 0)}")
             lines.extend(_summary_count_lines("reason_counts", data.get("reason_counts", {})))

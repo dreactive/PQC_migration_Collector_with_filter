@@ -430,6 +430,23 @@ def build_parser():
     )
     run_d0.add_argument("--batch-id", required=True)
     run_d0.add_argument("--limit", default=None, type=int)
+    run_d0.add_argument(
+        "--commit-history-per-page",
+        default=100,
+        type=int,
+        help="GitHub commit history page size per file for D0 traversal.",
+    )
+    run_d0.add_argument(
+        "--max-history-pages",
+        default=None,
+        type=int,
+        help="Optional cap on D0 commit history pages per file.",
+    )
+    run_d0.add_argument(
+        "--force-history",
+        action="store_true",
+        help="Revisit commits even when D0 has already stored a per-commit status.",
+    )
     run_f2 = subparsers.add_parser(
         "run-f2",
         help="Run F2 migration classification for D0-passed diff rows.",
@@ -636,7 +653,16 @@ def main(argv=None):
         conn = connect(root=PROJECT_ROOT)
         try:
             init_db(conn)
-            result = run_d0_batch(conn, args.batch_id, client, args.limit, PROJECT_ROOT)
+            result = run_d0_batch(
+                conn,
+                args.batch_id,
+                client,
+                args.limit,
+                PROJECT_ROOT,
+                commit_history_per_page=args.commit_history_per_page,
+                max_history_pages=args.max_history_pages,
+                force_history=args.force_history,
+            )
         finally:
             conn.close()
         print(json.dumps(result, indent=2))

@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from datetime import datetime, timezone
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
@@ -22,6 +23,89 @@ DEFAULT_RESUME_SAFETY_DELAY_SECONDS = 30
 
 class GitHubApiError(RuntimeError):
     """Raised when GitHub returns a non-2xx API response."""
+
+
+class GitHubRateLimitError(GitHubApiError):
+    """Raised when GitHub asks the collector to wait before retrying."""
+
+    def __init__(
+        self,
+        message,
+        *,
+        status_code=None,
+        request_url=None,
+        resource=None,
+        reset_at=None,
+        retry_after_seconds=None,
+        payload=None,
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.request_url = request_url
+        self.resource = resource
+        self.reset_at = reset_at
+        self.retry_after_seconds = retry_after_seconds
+        self.payload = payload or {}
+
+
+def _header_value(headers, name):
+    if not headers:
+        return None
+    target = name.lower()
+    for key, value in dict(headers).items():
+        if str(key).lower() == target:
+            return value
+    return None
+
+
+def _parse_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _iso_from_epoch(epoch):
+    value = _parse_int(epoch)
+    if value is None:
+        return None
+    return datetime.fromtimestamp(value, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _safe_json_body(exc):
+    body = exc.read().decode("utf-8")
+    if not body:
+        return {}
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError:
+        return {"message": body}
+
+
+def _rate_limit_error(exc, request_url, payload):
+    headers = dict(exc.headers.items()) if getattr(exc, "headers", None) else {}
+    retry_after = _parse_int(_header_value(headers, "retry-after"))
+    remaining = _parse_int(_header_value(headers, "x-ratelimit-remaining"))
+    reset = _parse_int(_header_value(headers, "x-ratelimit-reset"))
+    if exc.code not in (403, 429):
+        return None
+    message = str(payload.get("message") or "").lower()
+    is_rate_limited = retry_after is not None or remaining == 0 or "rate limit" in message
+    if not is_rate_limited:
+        return None
+    reset_at = _iso_from_epoch(reset)
+    wait_seconds = retry_after
+    if wait_seconds is None and reset is not None:
+        wait_seconds = max(0, reset - int(time.time()) + 1)
+    return GitHubRateLimitError(
+        f"GitHub API rate limited {exc.code} for {request_url}: {payload}",
+        status_code=exc.code,
+        request_url=request_url,
+        resource=_header_value(headers, "x-ratelimit-resource"),
+        reset_at=reset_at,
+        retry_after_seconds=wait_seconds,
+        payload=payload,
+    )
 
 
 class GitHubClient:
@@ -65,24 +149,46 @@ class GitHubClient:
             url = f"{url}?{urlencode(params)}"
         return url
 
-    def get_json(self, path, params=None):
+    def get_json(
+        self,
+        path,
+        params=None,
+        *,
+        wait_on_rate_limit=True,
+        max_rate_limit_wait_seconds=None,
+        rate_limit_retry_count=1,
+    ):
         """GET one GitHub JSON API resource."""
-        request = Request(self._url(path, params), headers=self._headers())
-        try:
-            with urlopen(request, timeout=self.timeout) as response:
-                body = response.read().decode("utf-8")
-                payload = json.loads(body) if body else {}
-                return {
-                    "status_code": response.status,
-                    "headers": dict(response.headers.items()),
-                    "payload": payload,
-                }
-        except HTTPError as exc:
-            body = exc.read().decode("utf-8")
-            payload = json.loads(body) if body else {}
-            raise GitHubApiError(
-                f"GitHub API error {exc.code} for {request.full_url}: {payload}"
-            ) from exc
+        request_url = self._url(path, params)
+        attempt = 0
+        while True:
+            request = Request(request_url, headers=self._headers())
+            try:
+                with urlopen(request, timeout=self.timeout) as response:
+                    body = response.read().decode("utf-8")
+                    payload = json.loads(body) if body else {}
+                    return {
+                        "status_code": response.status,
+                        "headers": dict(response.headers.items()),
+                        "payload": payload,
+                    }
+            except HTTPError as exc:
+                payload = _safe_json_body(exc)
+                rate_limit = _rate_limit_error(exc, request.full_url, payload)
+                if rate_limit is not None:
+                    if not wait_on_rate_limit or attempt >= int(rate_limit_retry_count):
+                        raise rate_limit from exc
+                    wait_seconds = rate_limit.retry_after_seconds
+                    if wait_seconds is None:
+                        wait_seconds = 0
+                    if max_rate_limit_wait_seconds is not None:
+                        wait_seconds = min(wait_seconds, int(max_rate_limit_wait_seconds))
+                    time.sleep(max(0, wait_seconds))
+                    attempt += 1
+                    continue
+                raise GitHubApiError(
+                    f"GitHub API error {exc.code} for {request.full_url}: {payload}"
+                ) from exc
 
     def rate_limit(self):
         """Fetch GitHub rate limit status."""
@@ -103,7 +209,15 @@ class GitHubClient:
         """Fetch one GitHub contents API file response by its API URL."""
         return self.get_json(file_url)
 
-    def list_commits_for_path(self, repo, path, page=1, per_page=30):
+    def list_commits_for_path(
+        self,
+        repo,
+        path,
+        page=1,
+        per_page=30,
+        *,
+        wait_on_rate_limit=True,
+    ):
         """Fetch one commit list page for a repository path."""
         full_name = repo.get("full_name") if isinstance(repo, dict) else str(repo)
         return self.get_json(
@@ -113,12 +227,16 @@ class GitHubClient:
                 "page": int(page),
                 "per_page": int(per_page),
             },
+            wait_on_rate_limit=wait_on_rate_limit,
         )
 
-    def get_commit(self, repo, sha):
+    def get_commit(self, repo, sha, *, wait_on_rate_limit=True):
         """Fetch one GitHub commit detail response."""
         full_name = repo.get("full_name") if isinstance(repo, dict) else str(repo)
-        return self.get_json(f"/repos/{full_name}/commits/{sha}")
+        return self.get_json(
+            f"/repos/{full_name}/commits/{sha}",
+            wait_on_rate_limit=wait_on_rate_limit,
+        )
 
 
 def _resource_snapshot(resources, name):

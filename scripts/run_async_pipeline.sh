@@ -17,6 +17,9 @@ QUERY_KEY="${QUERY_KEY:-}"
 START_PAGE="${START_PAGE:-1}"
 MAX_PAGES_PER_QUERY="${MAX_PAGES_PER_QUERY:-10}"
 STAGE_LIMIT="${STAGE_LIMIT:-1000}"
+D0_COMMIT_HISTORY_PER_PAGE="${D0_COMMIT_HISTORY_PER_PAGE:-100}"
+D0_MAX_HISTORY_PAGES="${D0_MAX_HISTORY_PAGES:-}"
+D0_FORCE_HISTORY="${D0_FORCE_HISTORY:-0}"
 COLLECT_THROTTLE_SECONDS="${COLLECT_THROTTLE_SECONDS:-3}"
 RETRY_COUNT="${RETRY_COUNT:-3}"
 RETRY_SLEEP_SECONDS="${RETRY_SLEEP_SECONDS:-10}"
@@ -164,8 +167,15 @@ stage_worker() {
             run-f1 --batch-id "$batch_id" --limit "$STAGE_LIMIT" || ok=$?
           ;;
         d0)
+          d0_args=(run-d0 --batch-id "$batch_id" --limit "$STAGE_LIMIT" --commit-history-per-page "$D0_COMMIT_HISTORY_PER_PAGE")
+          if [[ -n "$D0_MAX_HISTORY_PAGES" ]]; then
+            d0_args+=(--max-history-pages "$D0_MAX_HISTORY_PAGES")
+          fi
+          if [[ "$D0_FORCE_HISTORY" == "1" ]]; then
+            d0_args+=(--force-history)
+          fi
           run_with_retry "$stage" "$batch_id" "$PYTHON_BIN" runner/collect.py \
-            run-d0 --batch-id "$batch_id" --limit "$STAGE_LIMIT" || ok=$?
+            "${d0_args[@]}" || ok=$?
           ;;
         f2)
           run_with_retry "$stage" "$batch_id" "$PYTHON_BIN" runner/collect.py \

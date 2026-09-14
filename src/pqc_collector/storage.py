@@ -20,6 +20,7 @@ RAW_RESPONSE_PREFIXES = {
     "rate_limit": "rate_limit",
     "query_page": "query_page",
     "file": "file",
+    "commit_list": "commit_list",
     "commit": "commit",
     "pr": "pr",
 }
@@ -315,6 +316,84 @@ def init_diff_evidence_table(conn):
         )
         """
     )
+    _ensure_columns(
+        conn,
+        "d0_results",
+        {
+            "evidence_status": "TEXT NOT NULL DEFAULT 'processed'",
+            "evidence_reason_code": "TEXT",
+            "d0_status": "TEXT NOT NULL DEFAULT 'processed'",
+        },
+    )
+    conn.commit()
+
+
+def init_d0_history_tables(conn):
+    """Create D0 history traversal, per-commit status, and commit cache tables."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS d0_history_state (
+            batch_id TEXT NOT NULL,
+            search_item_key TEXT NOT NULL,
+            file_key TEXT,
+            repository_full_name TEXT NOT NULL,
+            search_item_path TEXT NOT NULL,
+            status TEXT NOT NULL,
+            next_page INTEGER NOT NULL DEFAULT 1,
+            last_processed_commit_sha TEXT,
+            listed_commit_count INTEGER NOT NULL DEFAULT 0,
+            processed_commit_count INTEGER NOT NULL DEFAULT 0,
+            skipped_commit_count INTEGER NOT NULL DEFAULT 0,
+            pass_commit_count INTEGER NOT NULL DEFAULT 0,
+            drop_commit_count INTEGER NOT NULL DEFAULT 0,
+            evidence_unavailable_count INTEGER NOT NULL DEFAULT 0,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            resume_after TEXT,
+            error_type TEXT,
+            error_message TEXT,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT,
+            PRIMARY KEY (batch_id, search_item_key)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS d0_commit_status (
+            batch_id TEXT NOT NULL,
+            search_item_key TEXT NOT NULL,
+            file_key TEXT,
+            repository_id INTEGER,
+            repository_full_name TEXT NOT NULL,
+            search_item_path TEXT NOT NULL,
+            commit_sha TEXT NOT NULL,
+            status TEXT NOT NULL,
+            reason_code TEXT,
+            error_type TEXT,
+            error_message TEXT,
+            raw_commit_path TEXT,
+            patch_path TEXT,
+            checked_at TEXT NOT NULL,
+            PRIMARY KEY (batch_id, search_item_key, commit_sha)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS commit_details (
+            repository_key TEXT NOT NULL,
+            repository_id INTEGER,
+            repository_full_name TEXT NOT NULL,
+            commit_sha TEXT NOT NULL,
+            raw_commit_path TEXT NOT NULL,
+            status TEXT NOT NULL,
+            error_type TEXT,
+            error_message TEXT,
+            fetched_at TEXT NOT NULL,
+            PRIMARY KEY (repository_key, commit_sha)
+        )
+        """
+    )
     conn.commit()
 
 
@@ -381,6 +460,7 @@ def init_db(conn):
     init_file_fetch_results_table(conn)
     init_f1_results_table(conn)
     init_diff_evidence_table(conn)
+    init_d0_history_tables(conn)
     init_f2_results_table(conn)
 
 
@@ -1033,6 +1113,9 @@ def iter_d0_passed_rows(conn, batch_id, limit=None):
             d0_results.reason_codes_json AS d0_reason_codes_json,
             d0_results.raw_commit_path AS raw_commit_path,
             d0_results.patch_path AS patch_path,
+            d0_results.evidence_status AS evidence_status,
+            d0_results.evidence_reason_code AS evidence_reason_code,
+            d0_results.d0_status AS d0_status,
             d0_results.checked_at AS d0_checked_at,
             f1_results.language AS language,
             f1_results.target_libraries_json AS target_libraries_json,
@@ -1427,6 +1510,323 @@ def _d0_diff_file_key(row):
     return make_diff_file_key(repository_id, commit_sha, path)
 
 
+def _timestamp(value=None):
+    return value or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _repository_cache_key(item):
+    repository_id = item.get("repository_id")
+    if repository_id is not None:
+        return f"id:{int(repository_id)}"
+    return f"name:{item['repository_full_name']}"
+
+
+def read_d0_history_state(conn, batch_id, search_item_key):
+    """Return saved D0 history traversal state for one file, if present."""
+    row = conn.execute(
+        """
+        SELECT *
+        FROM d0_history_state
+        WHERE batch_id = ? AND search_item_key = ?
+        """,
+        (batch_id, search_item_key),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_d0_history_state(
+    conn,
+    batch_id,
+    item,
+    *,
+    status,
+    next_page=1,
+    last_processed_commit_sha=None,
+    counters=None,
+    resume_after=None,
+    error=None,
+    completed_at=None,
+    checked_at=None,
+):
+    """Insert or update resumable D0 history traversal state for one file."""
+    counters = counters or {}
+    timestamp = _timestamp(checked_at)
+    error_type = type(error).__name__ if error else None
+    error_message = str(error) if error else None
+    values = {
+        "batch_id": batch_id,
+        "search_item_key": item["search_item_key"],
+        "file_key": item.get("file_key"),
+        "repository_full_name": item["repository_full_name"],
+        "search_item_path": normalize_path(
+            item.get("normalized_path") or item.get("search_item_path") or item.get("path")
+        ),
+        "status": status,
+        "next_page": max(1, int(next_page or 1)),
+        "last_processed_commit_sha": last_processed_commit_sha,
+        "listed_commit_count": int(counters.get("listed_commit_count", 0)),
+        "processed_commit_count": int(counters.get("processed_commit_count", 0)),
+        "skipped_commit_count": int(counters.get("skipped_commit_count", 0)),
+        "pass_commit_count": int(counters.get("pass_commit_count", 0)),
+        "drop_commit_count": int(counters.get("drop_commit_count", 0)),
+        "evidence_unavailable_count": int(counters.get("evidence_unavailable_count", 0)),
+        "error_count": int(counters.get("error_count", 0)),
+        "resume_after": resume_after,
+        "error_type": error_type,
+        "error_message": error_message,
+        "updated_at": timestamp,
+        "completed_at": completed_at,
+    }
+    conn.execute(
+        """
+        INSERT INTO d0_history_state (
+            batch_id,
+            search_item_key,
+            file_key,
+            repository_full_name,
+            search_item_path,
+            status,
+            next_page,
+            last_processed_commit_sha,
+            listed_commit_count,
+            processed_commit_count,
+            skipped_commit_count,
+            pass_commit_count,
+            drop_commit_count,
+            evidence_unavailable_count,
+            error_count,
+            resume_after,
+            error_type,
+            error_message,
+            updated_at,
+            completed_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(batch_id, search_item_key) DO UPDATE SET
+            file_key = excluded.file_key,
+            repository_full_name = excluded.repository_full_name,
+            search_item_path = excluded.search_item_path,
+            status = excluded.status,
+            next_page = excluded.next_page,
+            last_processed_commit_sha = excluded.last_processed_commit_sha,
+            listed_commit_count = excluded.listed_commit_count,
+            processed_commit_count = excluded.processed_commit_count,
+            skipped_commit_count = excluded.skipped_commit_count,
+            pass_commit_count = excluded.pass_commit_count,
+            drop_commit_count = excluded.drop_commit_count,
+            evidence_unavailable_count = excluded.evidence_unavailable_count,
+            error_count = excluded.error_count,
+            resume_after = excluded.resume_after,
+            error_type = excluded.error_type,
+            error_message = excluded.error_message,
+            updated_at = excluded.updated_at,
+            completed_at = excluded.completed_at
+        """,
+        (
+            values["batch_id"],
+            values["search_item_key"],
+            values["file_key"],
+            values["repository_full_name"],
+            values["search_item_path"],
+            values["status"],
+            values["next_page"],
+            values["last_processed_commit_sha"],
+            values["listed_commit_count"],
+            values["processed_commit_count"],
+            values["skipped_commit_count"],
+            values["pass_commit_count"],
+            values["drop_commit_count"],
+            values["evidence_unavailable_count"],
+            values["error_count"],
+            values["resume_after"],
+            values["error_type"],
+            values["error_message"],
+            values["updated_at"],
+            values["completed_at"],
+        ),
+    )
+    conn.commit()
+    return values
+
+
+def read_d0_commit_status(conn, batch_id, search_item_key, commit_sha):
+    """Return D0 status for one already-seen file commit, if present."""
+    row = conn.execute(
+        """
+        SELECT *
+        FROM d0_commit_status
+        WHERE batch_id = ? AND search_item_key = ? AND commit_sha = ?
+        """,
+        (batch_id, search_item_key, commit_sha),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_d0_commit_status(
+    conn,
+    batch_id,
+    item,
+    commit_sha,
+    *,
+    status,
+    reason_code=None,
+    error=None,
+    raw_commit_path=None,
+    patch_path=None,
+    checked_at=None,
+):
+    """Insert or update the processing status for one file commit."""
+    timestamp = _timestamp(checked_at)
+    error_type = type(error).__name__ if error else None
+    error_message = str(error) if error else None
+    values = {
+        "batch_id": batch_id,
+        "search_item_key": item["search_item_key"],
+        "file_key": item.get("file_key"),
+        "repository_id": item.get("repository_id"),
+        "repository_full_name": item["repository_full_name"],
+        "search_item_path": normalize_path(
+            item.get("normalized_path") or item.get("search_item_path") or item.get("path")
+        ),
+        "commit_sha": commit_sha,
+        "status": status,
+        "reason_code": reason_code,
+        "error_type": error_type,
+        "error_message": error_message,
+        "raw_commit_path": raw_commit_path,
+        "patch_path": patch_path,
+        "checked_at": timestamp,
+    }
+    conn.execute(
+        """
+        INSERT INTO d0_commit_status (
+            batch_id,
+            search_item_key,
+            file_key,
+            repository_id,
+            repository_full_name,
+            search_item_path,
+            commit_sha,
+            status,
+            reason_code,
+            error_type,
+            error_message,
+            raw_commit_path,
+            patch_path,
+            checked_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(batch_id, search_item_key, commit_sha) DO UPDATE SET
+            file_key = excluded.file_key,
+            repository_id = excluded.repository_id,
+            repository_full_name = excluded.repository_full_name,
+            search_item_path = excluded.search_item_path,
+            status = excluded.status,
+            reason_code = excluded.reason_code,
+            error_type = excluded.error_type,
+            error_message = excluded.error_message,
+            raw_commit_path = excluded.raw_commit_path,
+            patch_path = excluded.patch_path,
+            checked_at = excluded.checked_at
+        """,
+        (
+            values["batch_id"],
+            values["search_item_key"],
+            values["file_key"],
+            values["repository_id"],
+            values["repository_full_name"],
+            values["search_item_path"],
+            values["commit_sha"],
+            values["status"],
+            values["reason_code"],
+            values["error_type"],
+            values["error_message"],
+            values["raw_commit_path"],
+            values["patch_path"],
+            values["checked_at"],
+        ),
+    )
+    conn.commit()
+    return values
+
+
+def read_commit_detail(conn, item, commit_sha):
+    """Return cached raw commit metadata for one repository commit, if present."""
+    row = conn.execute(
+        """
+        SELECT *
+        FROM commit_details
+        WHERE repository_key = ? AND commit_sha = ? AND status = 'fetched'
+        """,
+        (_repository_cache_key(item), commit_sha),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_commit_detail(
+    conn,
+    item,
+    commit_sha,
+    raw_commit_path,
+    *,
+    status="fetched",
+    error=None,
+    fetched_at=None,
+):
+    """Insert or update the repository-scoped commit detail cache."""
+    timestamp = _timestamp(fetched_at)
+    error_type = type(error).__name__ if error else None
+    error_message = str(error) if error else None
+    values = {
+        "repository_key": _repository_cache_key(item),
+        "repository_id": item.get("repository_id"),
+        "repository_full_name": item["repository_full_name"],
+        "commit_sha": commit_sha,
+        "raw_commit_path": raw_commit_path,
+        "status": status,
+        "error_type": error_type,
+        "error_message": error_message,
+        "fetched_at": timestamp,
+    }
+    conn.execute(
+        """
+        INSERT INTO commit_details (
+            repository_key,
+            repository_id,
+            repository_full_name,
+            commit_sha,
+            raw_commit_path,
+            status,
+            error_type,
+            error_message,
+            fetched_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(repository_key, commit_sha) DO UPDATE SET
+            repository_id = excluded.repository_id,
+            repository_full_name = excluded.repository_full_name,
+            raw_commit_path = excluded.raw_commit_path,
+            status = excluded.status,
+            error_type = excluded.error_type,
+            error_message = excluded.error_message,
+            fetched_at = excluded.fetched_at
+        """,
+        (
+            values["repository_key"],
+            values["repository_id"],
+            values["repository_full_name"],
+            values["commit_sha"],
+            values["raw_commit_path"],
+            values["status"],
+            values["error_type"],
+            values["error_message"],
+            values["fetched_at"],
+        ),
+    )
+    conn.commit()
+    return values
+
+
 def upsert_diff_evidence(conn, batch_id, row):
     """Insert or update one D0 exact diff evidence result row."""
     existing = conn.execute(
@@ -1455,6 +1855,9 @@ def upsert_diff_evidence(conn, batch_id, row):
         "reason_codes": list(row.get("reason_codes", [])),
         "raw_commit_path": row["raw_commit_path"],
         "patch_path": row.get("patch_path"),
+        "evidence_status": row.get("evidence_status") or "processed",
+        "evidence_reason_code": row.get("evidence_reason_code"),
+        "d0_status": row.get("d0_status") or "processed",
         "checked_at": row.get("checked_at")
         or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
@@ -1479,9 +1882,12 @@ def upsert_diff_evidence(conn, batch_id, row):
             reason_codes_json,
             raw_commit_path,
             patch_path,
+            evidence_status,
+            evidence_reason_code,
+            d0_status,
             checked_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(batch_id, search_item_key, commit_sha) DO UPDATE SET
             file_key = excluded.file_key,
             diff_file_key = excluded.diff_file_key,
@@ -1497,6 +1903,9 @@ def upsert_diff_evidence(conn, batch_id, row):
             reason_codes_json = excluded.reason_codes_json,
             raw_commit_path = excluded.raw_commit_path,
             patch_path = excluded.patch_path,
+            evidence_status = excluded.evidence_status,
+            evidence_reason_code = excluded.evidence_reason_code,
+            d0_status = excluded.d0_status,
             checked_at = excluded.checked_at
         """,
         (
@@ -1517,6 +1926,9 @@ def upsert_diff_evidence(conn, batch_id, row):
             json.dumps(values["reason_codes"], ensure_ascii=True, sort_keys=True),
             values["raw_commit_path"],
             values["patch_path"],
+            values["evidence_status"],
+            values["evidence_reason_code"],
+            values["d0_status"],
             values["checked_at"],
         ),
     )
